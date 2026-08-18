@@ -1,35 +1,228 @@
 // PocketBase-style filter expressions compiled to parameterized SQL.
-// Grammar and compilation rules: specs/filter.md.
+// ONE parser, two consumers: `filter=` on record lists and the per-collection API
+// rules in src/rules.rs. Grammar and compilation rules: specs/filter.md.
+// Parsing yields a `Node` tree with two backends — `to_sql` for the SQL paths
+// (list / view / update / delete) and `eval` for the in-memory path (create, SSE),
+// so both can never disagree about precedence or short-circuiting.
 // Trust boundary: field names are whitelist-checked (ident_ok) before
 // interpolation; values ALWAYS travel as binds, never in the SQL string.
 
 use rusqlite::types::Value;
+use serde_json::{Map, Value as Json};
 
 use crate::ident_ok;
 
 const MAX_LEN: usize = 2048;
 const MAX_DEPTH: u32 = 32;
+const TOKEN: &str = "@request.auth.id";
 
-/// Compile a filter expression to a WHERE fragment (no leading AND) and its
-/// binds, in placeholder order.
-pub fn compile(input: &str) -> Result<(String, Vec<Value>), String> {
+/// The only place the two dialects differ: a bare, unquoted, non-numeric word.
+/// `title=rock` in a filter is the literal "rock"; `@request.auth.id = author`
+/// in a rule is a column reference. Everything else parses identically.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Mode {
+    Filter,
+    Rule,
+}
+
+pub enum Operand {
+    /// ident_ok-checked field name
+    Col(String),
+    /// `@request.auth.id` — always a bind carrying the caller's id, never text
+    Auth,
+    Val(Value),
+    Null,
+}
+
+pub enum Node {
+    Or(Box<Node>, Box<Node>),
+    And(Box<Node>, Box<Node>),
+    Cmp(Operand, &'static str, Operand),
+}
+
+/// Parse an expression. Every operand is resolved here, so a successful parse
+/// always compiles and always evaluates — which is what lets `read_rule` validate
+/// a stored rule by parsing it once, with no caller in hand.
+pub fn parse(input: &str, mode: Mode) -> Result<Node, String> {
     if input.len() > MAX_LEN {
         return Err("filter too long".into());
     }
-    let mut p = Parser { b: input.as_bytes(), i: 0 };
-    let mut sql = String::new();
-    let mut binds = Vec::new();
-    p.expr(&mut sql, &mut binds, 0)?;
+    let mut p = Parser { b: input.as_bytes(), i: 0, mode };
+    let n = p.expr(0)?;
     p.ws();
     if p.i < p.b.len() {
         return Err(format!("unexpected trailing input at byte {}", p.i));
     }
-    Ok((sql, binds))
+    Ok(n)
+}
+
+/// Compile a filter expression to a WHERE fragment (no leading AND) and its
+/// binds, in placeholder order.
+pub fn compile(input: &str) -> Result<(String, Vec<Value>), String> {
+    Ok(parse(input, Mode::Filter)?.to_sql(""))
+}
+
+impl Operand {
+    /// SQL text for this operand, pushing a bind if it carries a value.
+    fn sql(&self, auth: &str, binds: &mut Vec<Value>) -> String {
+        match self {
+            // ident_ok whitelists [A-Za-z0-9_], guarding this interpolation
+            Operand::Col(f) => match f.as_str() {
+                "id" | "created" | "updated" => f.clone(),
+                _ => format!("json_extract(data, '$.{f}')"),
+            },
+            Operand::Auth => {
+                binds.push(Value::Text(auth.to_string()));
+                "?".into()
+            }
+            Operand::Val(v) => {
+                binds.push(v.clone());
+                "?".into()
+            }
+            Operand::Null => "NULL".into(),
+        }
+    }
+
+    /// id/created/updated are ordinary lookups: absent on create (the row does not
+    /// exist yet, so Null like any missing field), present when `data` is a full
+    /// record snapshot — which is what realtime gates delete events against.
+    fn json(&self, auth: &str, data: &Map<String, Json>) -> Json {
+        match self {
+            Operand::Col(f) => data.get(f).cloned().unwrap_or(Json::Null),
+            Operand::Auth => Json::String(auth.to_string()),
+            Operand::Val(Value::Text(s)) => Json::String(s.clone()),
+            Operand::Val(Value::Integer(n)) => (*n).into(),
+            Operand::Val(Value::Real(f)) => serde_json::json!(f),
+            _ => Json::Null,
+        }
+    }
+}
+
+/// SQLite-ish numeric view of a JSON value: booleans are 1/0, so `flag = true`
+/// and `score = 1` both compare numerically — the same coercion the SQL path gets
+/// for free, which is what keeps the two paths from granting different things.
+fn num(v: &Json) -> Option<f64> {
+    match v {
+        Json::Bool(b) => Some(*b as u8 as f64),
+        _ => v.as_f64(),
+    }
+}
+
+fn text(v: &Json) -> String {
+    match v {
+        Json::String(s) => s.clone(),
+        _ => v.to_string(),
+    }
+}
+
+impl Node {
+    /// A WHERE fragment plus its binds, in placeholder order. Callers AND it into
+    /// a larger WHERE, so a top-level OR is parenthesised here — otherwise
+    /// `collection = ? AND id = ? AND a OR b` would let `b` alone grant access.
+    pub fn to_sql(&self, auth_id: &str) -> (String, Vec<Value>) {
+        let (mut sql, mut binds) = (String::new(), Vec::new());
+        self.sql(auth_id, &mut sql, &mut binds);
+        if matches!(self, Node::Or(..)) {
+            sql = format!("({sql})");
+        }
+        (sql, binds)
+    }
+
+    fn sql(&self, auth: &str, out: &mut String, binds: &mut Vec<Value>) {
+        match self {
+            Node::Or(a, b) => {
+                a.sql(auth, out, binds);
+                out.push_str(" OR ");
+                b.sql(auth, out, binds);
+            }
+            // SQL's own precedence matches this grammar's, so only an OR nested
+            // under an AND needs parens of its own.
+            Node::And(a, b) => {
+                for (i, side) in [a, b].into_iter().enumerate() {
+                    if i == 1 {
+                        out.push_str(" AND ");
+                    }
+                    let paren = matches!(**side, Node::Or(..));
+                    if paren {
+                        out.push('(');
+                    }
+                    side.sql(auth, out, binds);
+                    if paren {
+                        out.push(')');
+                    }
+                }
+            }
+            Node::Cmp(l, op, Operand::Null) => {
+                let not = if *op == "!=" { "NOT " } else { "" };
+                out.push_str(&format!("({} IS {not}NULL)", l.sql(auth, binds)));
+            }
+            Node::Cmp(l, op @ ("~" | "!~"), r) => {
+                let not = if *op == "!~" { "NOT " } else { "" };
+                let pat = match r {
+                    Operand::Auth => auth.to_string(),
+                    Operand::Val(Value::Text(s)) => s.clone(),
+                    Operand::Val(Value::Integer(n)) => n.to_string(),
+                    Operand::Val(Value::Real(f)) => f.to_string(),
+                    // the parser rejects every other shape on the right of a LIKE
+                    _ => String::new(),
+                };
+                out.push_str(&format!("({} {not}LIKE ?)", l.sql(auth, binds)));
+                // ponytail: % and _ inside a ~ value act as LIKE wildcards; add ESCAPE clause if it bites
+                binds.push(Value::Text(format!("%{pat}%")));
+            }
+            Node::Cmp(l, op, r) => {
+                let (ls, rs) = (l.sql(auth, binds), r.sql(auth, binds));
+                out.push_str(&format!("({ls} {op} {rs})"));
+            }
+        }
+    }
+
+    /// Evaluate against an in-memory record body — used by create, where no row
+    /// exists to run SQL against, and by realtime, whose row may already be gone.
+    /// Mirrors SQLite: NULL never compares true, numbers coerce.
+    pub fn eval(&self, auth: &str, data: &Map<String, Json>) -> bool {
+        match self {
+            Node::Or(a, b) => a.eval(auth, data) || b.eval(auth, data),
+            Node::And(a, b) => a.eval(auth, data) && b.eval(auth, data),
+            Node::Cmp(l, op, r) => {
+                let lv = l.json(auth, data);
+                // `x = null` / `x != null` are presence tests, like IS [NOT] NULL
+                if matches!(r, Operand::Null) {
+                    return lv.is_null() == (*op == "=");
+                }
+                let rv = r.json(auth, data);
+                // a comparison against a missing field is never true: fail closed
+                if lv.is_null() || rv.is_null() {
+                    return false;
+                }
+                if *op == "~" || *op == "!~" {
+                    return text(&lv).contains(&text(&rv)) == (*op == "~");
+                }
+                match (num(&lv), num(&rv)) {
+                    (Some(a), Some(b)) => match *op {
+                        "=" => a == b,
+                        "!=" => a != b,
+                        ">" => a > b,
+                        ">=" => a >= b,
+                        "<" => a < b,
+                        _ => a <= b,
+                    },
+                    // ordering only makes sense between two numbers
+                    _ => match *op {
+                        "=" => lv == rv,
+                        "!=" => lv != rv,
+                        _ => false,
+                    },
+                }
+            }
+        }
+    }
 }
 
 struct Parser<'a> {
     b: &'a [u8],
     i: usize,
+    mode: Mode,
 }
 
 impl Parser<'_> {
@@ -49,67 +242,64 @@ impl Parser<'_> {
     }
 
     // expr := and ( "||" and )*
-    fn expr(&mut self, sql: &mut String, binds: &mut Vec<Value>, depth: u32) -> Result<(), String> {
-        self.and(sql, binds, depth)?;
+    fn expr(&mut self, depth: u32) -> Result<Node, String> {
+        let mut n = self.and(depth)?;
         loop {
             self.ws();
             if !self.eat("||") {
-                return Ok(());
+                return Ok(n);
             }
-            sql.push_str(" OR ");
-            self.and(sql, binds, depth)?;
+            n = Node::Or(Box::new(n), Box::new(self.and(depth)?));
         }
     }
 
     // and := unit ( "&&" unit )*
-    fn and(&mut self, sql: &mut String, binds: &mut Vec<Value>, depth: u32) -> Result<(), String> {
-        self.unit(sql, binds, depth)?;
+    fn and(&mut self, depth: u32) -> Result<Node, String> {
+        let mut n = self.unit(depth)?;
         loop {
             self.ws();
             if !self.eat("&&") {
-                return Ok(());
+                return Ok(n);
             }
-            sql.push_str(" AND ");
-            self.unit(sql, binds, depth)?;
+            n = Node::And(Box::new(n), Box::new(self.unit(depth)?));
         }
     }
 
     // unit := "(" expr ")" | comparison
-    fn unit(&mut self, sql: &mut String, binds: &mut Vec<Value>, depth: u32) -> Result<(), String> {
+    fn unit(&mut self, depth: u32) -> Result<Node, String> {
         self.ws();
         if self.eat("(") {
             if depth >= MAX_DEPTH {
                 return Err("filter nesting too deep".into());
             }
-            sql.push('(');
-            self.expr(sql, binds, depth + 1)?;
+            let n = self.expr(depth + 1)?;
             self.ws();
             if !self.eat(")") {
                 return Err(format!("expected ')' at byte {}", self.i));
             }
-            sql.push(')');
-            return Ok(());
+            return Ok(n);
         }
-        self.comparison(sql, binds)
+        self.comparison()
     }
 
-    // comparison := field op value
-    fn comparison(&mut self, sql: &mut String, binds: &mut Vec<Value>) -> Result<(), String> {
-        let start = self.i;
-        while self.i < self.b.len()
-            && (self.b[self.i].is_ascii_alphanumeric() || self.b[self.i] == b'_')
-        {
-            self.i += 1;
-        }
-        // slice bounds are ASCII, so this is always valid UTF-8
-        let field = std::str::from_utf8(&self.b[start..self.i]).unwrap();
-        if !ident_ok(field) {
-            return Err(format!("expected field name at byte {start}"));
-        }
-        // ident_ok whitelists [A-Za-z0-9_], guarding this interpolation
-        let col = match field {
-            "id" | "created" | "updated" => field.to_string(),
-            _ => format!("json_extract(data, '$.{field}')"),
+    // comparison := (field | auth token) op value
+    fn comparison(&mut self) -> Result<Node, String> {
+        self.ws();
+        let lhs = if self.eat(TOKEN) {
+            Operand::Auth
+        } else {
+            let start = self.i;
+            while self.i < self.b.len()
+                && (self.b[self.i].is_ascii_alphanumeric() || self.b[self.i] == b'_')
+            {
+                self.i += 1;
+            }
+            // slice bounds are ASCII, so this is always valid UTF-8
+            let field = std::str::from_utf8(&self.b[start..self.i]).unwrap();
+            if !ident_ok(field) {
+                return Err(format!("expected field name at byte {start}"));
+            }
+            Operand::Col(field.to_string())
         };
         self.ws();
         // two-char ops before their one-char prefixes
@@ -118,37 +308,21 @@ impl Parser<'_> {
             .find(|o| self.eat(o))
             .ok_or_else(|| format!("expected operator at byte {}", self.i))?;
         self.ws();
-        match self.value()? {
-            None => match op {
-                "=" => sql.push_str(&format!("({col} IS NULL)")),
-                "!=" => sql.push_str(&format!("({col} IS NOT NULL)")),
-                _ => return Err(format!("null not allowed with '{op}'")),
-            },
-            Some(v) => match op {
-                "~" | "!~" => {
-                    let s = match v {
-                        Value::Text(s) => s,
-                        Value::Integer(n) => n.to_string(),
-                        Value::Real(f) => f.to_string(),
-                        _ => unreachable!(),
-                    };
-                    let not = if op == "!~" { "NOT " } else { "" };
-                    sql.push_str(&format!("({col} {not}LIKE ?)"));
-                    // ponytail: % and _ inside a ~ value act as LIKE wildcards; add ESCAPE clause if it bites
-                    binds.push(Value::Text(format!("%{s}%")));
-                }
-                _ => {
-                    sql.push_str(&format!("({col} {op} ?)"));
-                    binds.push(v);
-                }
-            },
+        let rhs = self.value()?;
+        match (&rhs, op) {
+            (Operand::Null, "=" | "!=") => {}
+            (Operand::Null, _) => return Err(format!("null not allowed with '{op}'")),
+            // LIKE needs a pattern to bind, not a second column
+            (Operand::Col(_), "~" | "!~") => {
+                return Err(format!("'{op}' needs a literal at byte {}", self.i))
+            }
+            _ => {}
         }
-        Ok(())
+        Ok(Node::Cmp(lhs, op, rhs))
     }
 
-    // value := quoted string | number | true | false | null | bareword.
-    // None means null (compiles to IS NULL / IS NOT NULL upstream).
-    fn value(&mut self) -> Result<Option<Value>, String> {
+    // value := quoted string | number | true | false | null | auth token | bareword
+    fn value(&mut self) -> Result<Operand, String> {
         if self.eat("'") {
             let mut s: Vec<u8> = Vec::new();
             loop {
@@ -158,7 +332,7 @@ impl Parser<'_> {
                         self.i += 1;
                         if !self.eat("'") {
                             // splits only at ASCII quote bytes of valid UTF-8 input
-                            return Ok(Some(Value::Text(String::from_utf8(s).unwrap())));
+                            return Ok(Operand::Val(Value::Text(String::from_utf8(s).unwrap())));
                         }
                         s.push(b'\''); // '' escape = literal quote
                     }
@@ -181,24 +355,34 @@ impl Parser<'_> {
         if w.is_empty() {
             return Err(format!("expected value at byte {start}"));
         }
+        // checked before the bareword rules below, so it can never degrade to a literal
+        if w == TOKEN {
+            return Ok(Operand::Auth);
+        }
         Ok(match w {
-            "true" => Some(Value::Integer(1)),
-            "false" => Some(Value::Integer(0)),
-            "null" => None,
-            _ => Some(if let Ok(n) = w.parse::<i64>() {
-                Value::Integer(n)
-            } else if let Ok(f) = w.parse::<f64>() {
-                Value::Real(f)
-            } else {
-                Value::Text(w.to_string())
-            }),
+            "true" => Operand::Val(Value::Integer(1)),
+            "false" => Operand::Val(Value::Integer(0)),
+            "null" => Operand::Null,
+            _ => {
+                if let Ok(n) = w.parse::<i64>() {
+                    Operand::Val(Value::Integer(n))
+                } else if let Ok(f) = w.parse::<f64>() {
+                    Operand::Val(Value::Real(f))
+                } else if self.mode == Mode::Rule {
+                    if !ident_ok(w) {
+                        return Err(format!("expected field name at byte {start}"));
+                    }
+                    Operand::Col(w.to_string())
+                } else {
+                    Operand::Val(Value::Text(w.to_string()))
+                }
+            }
         })
     }
 }
-
 #[cfg(test)]
 mod tests {
-    use super::compile;
+    use super::{compile, parse, Mode};
     use rusqlite::types::Value::{Integer, Text};
 
     #[test]
@@ -273,5 +457,23 @@ mod tests {
         assert!(compile("=5").is_err());
         assert!(compile("views>").is_err());
         assert!(compile("").is_err());
+    }
+
+    // Security invariant, not cosmetics. gate_record splices a rule fragment as
+    // `... AND id = ? AND {frag}`. Without the wrap, a top-level `||` reassociates to
+    // `(collection AND id AND a) OR b`, so the b-disjunct matching ANY OTHER ROW grants
+    // access to this one. Harmless while rules were single comparisons; a private-record
+    // read the moment `||` became expressible. Wrapping here makes every emitted
+    // fragment safe to AND into a larger WHERE, at the source rather than per caller.
+    #[test]
+    fn top_level_or_is_parenthesised_for_safe_splicing() {
+        let (sql, _) = parse("a = 1 || b = 2", Mode::Rule).unwrap().to_sql("");
+        assert!(
+            sql.starts_with('(') && sql.ends_with(')'),
+            "a top-level Or must be wrapped or it reassociates when ANDed: {sql}"
+        );
+        // an And root needs no wrap, and must not gain one (filter unit tests pin the SQL)
+        let (sql, _) = parse("a = 1 && b = 2", Mode::Rule).unwrap().to_sql("");
+        assert!(!sql.starts_with("(("), "And root should not be double-wrapped: {sql}");
     }
 }
