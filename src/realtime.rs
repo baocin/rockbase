@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
-use crate::auth::{who, Who};
+use crate::auth::{who, who_from_query_token, Who};
 use crate::db::get_collection;
 use crate::rules::{auth_id, check_rule, eval_rule_mem, VIEW};
 use crate::{App, S};
@@ -18,6 +18,9 @@ use crate::{App, S};
 #[derive(Deserialize)]
 pub struct RtParams {
     topics: Option<String>,
+    /// Browser `EventSource` cannot send an Authorization header, so a subscription
+    /// may carry its credential here instead. Header wins whenever one is present.
+    token: Option<String>,
 }
 
 /// Fail closed: forward an event only if this subscriber could read the record.
@@ -47,8 +50,15 @@ pub async fn realtime(
     headers: HeaderMap,
     Query(q): Query<RtParams>,
 ) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    // who() locks the db itself, so resolve identity once, up front, outside the stream
-    let w = who(&app, &headers);
+    // who() locks the db itself, so resolve identity once, up front, outside the stream.
+    // An Authorization header, even a malformed one, decides identity on its own: a
+    // ?token= appended by a redirect, a copy-pasted link, or an injected URL must never
+    // change who a request is, nor silently upgrade one whose real credential expired.
+    let w = match (headers.contains_key("authorization"), q.token.as_deref()) {
+        (true, _) => who(&app, &headers),
+        (false, Some(t)) => who_from_query_token(&app, t),
+        (false, None) => Who::Guest,
+    };
     // empty / whitespace / comma-only all mean "no filter"
     let topics: HashSet<String> = q
         .topics

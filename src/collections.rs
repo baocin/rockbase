@@ -245,6 +245,8 @@ pub async fn collections_delete(
     }
     db.execute("DELETE FROM records WHERE collection = ?1", [&name])
         .unwrap();
+    drop(db); // never do file IO under the mutex
+    crate::files::remove_collection_files(&name);
     Ok(Json(json!({})))
 }
 

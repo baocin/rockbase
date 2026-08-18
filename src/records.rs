@@ -394,14 +394,18 @@ pub fn create_core(db: &Connection, w: &Who, name: &str, body: &Value) -> Effect
         return Err(err(StatusCode::BAD_REQUEST, "body must be a JSON object"));
     };
     let is_auth = ty == "auth";
-    validate(&schema, &data, is_auth, false).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
-    check_relations(db, &schema, &data).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
-    // no row exists yet, so the create rule is evaluated in memory, before the insert
+    // Gate BEFORE validating. If validation ran first, an unauthorized caller could tell
+    // a valid body from an invalid one by 400-vs-403 and map out a schema that is
+    // otherwise admin-only. Evaluating the rule against an unvalidated body is safe:
+    // an unresolvable or wrongly-typed operand makes the comparison false, i.e. denies.
+    // It also spares the database the relation lookups for callers who cannot write.
     if let Some(expr) = check_rule(w, &col.rules[CREATE])? {
         if !eval_rule_mem(&expr, auth_id(w), &data) {
             return Err(deny(w));
         }
     }
+    validate(&schema, &data, is_auth, false).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    check_relations(db, &schema, &data).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
     if is_auth {
         let email = data.get("email").and_then(|e| e.as_str()).unwrap_or("");
         if !email.contains('@') {

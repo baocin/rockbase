@@ -27,6 +27,45 @@ pub enum Who {
     Guest,
 }
 
+/// Decode a bare JWT into a user identity. `None` for anything invalid — bad
+/// signature, expired, malformed — and also for a token whose user has since been
+/// deleted, which behaves exactly like no token at all.
+///
+/// ponytail: this locks app.db itself — never call it while already holding the
+/// lock. Every call site resolves identity before the handler takes the lock.
+fn from_jwt(app: &App, t: &str) -> Option<Who> {
+    let t = decode::<Claims>(
+        t,
+        &DecodingKey::from_secret(app.jwt_secret.as_bytes()),
+        &Validation::default(),
+    )
+    .ok()?;
+    let c = t.claims;
+    let db = app.db.lock().unwrap();
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM records WHERE collection = ?1 AND id = ?2)",
+            params![c.col, c.sub],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    exists.then(|| Who::User { col: c.col, id: c.sub })
+}
+
+/// Resolve a bare credential carrying no scheme prefix — either the admin token or
+/// a JWT. This exists solely for the SSE `?token=` fallback, because browser
+/// `EventSource` cannot set an Authorization header.
+///
+/// SSE ONLY. Do NOT wire this into `who()`. A credential in a URL leaks into access
+/// logs, browser history, and `Referer` headers, so it must not become a general
+/// purpose auth mechanism — `tests/sse_token.rs` asserts the REST API still refuses it.
+pub fn who_from_query_token(app: &App, t: &str) -> Who {
+    if t == app.admin_token {
+        return Who::Admin;
+    }
+    from_jwt(app, t).unwrap_or(Who::Guest)
+}
+
 pub fn who(app: &App, headers: &HeaderMap) -> Who {
     let Some(h) = headers.get("authorization").and_then(|v| v.to_str().ok()) else {
         return Who::Guest;
@@ -37,26 +76,8 @@ pub fn who(app: &App, headers: &HeaderMap) -> Who {
         }
     }
     if let Some(t) = h.strip_prefix("Bearer ") {
-        if let Ok(t) = decode::<Claims>(
-            t,
-            &DecodingKey::from_secret(app.jwt_secret.as_bytes()),
-            &Validation::default(),
-        ) {
-            let c = t.claims;
-            // A deleted user's token behaves exactly like no token.
-            // ponytail: who() locks app.db itself — never call it while holding the lock.
-            // All current call sites run before the handler locks; keep it that way.
-            let db = app.db.lock().unwrap();
-            let exists: bool = db
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM records WHERE collection = ?1 AND id = ?2)",
-                    params![c.col, c.sub],
-                    |r| r.get(0),
-                )
-                .unwrap_or(false);
-            if exists {
-                return Who::User { col: c.col, id: c.sub };
-            }
+        if let Some(w) = from_jwt(app, t) {
+            return w;
         }
     }
     Who::Guest

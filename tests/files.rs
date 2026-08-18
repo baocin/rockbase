@@ -1133,3 +1133,40 @@ async fn denied_delete_keeps_the_file() {
     assert_eq!(s, StatusCode::OK, "a denied delete must not remove the file");
     assert_eq!(body, b"KEEP");
 }
+
+// Deleting a collection must take its uploaded files with it. The collection row and
+// its records go, but before this test nothing removed the storage directory, so every
+// uploaded byte was orphaned on disk permanently with no API left to reach it.
+#[tokio::test]
+async fn deleting_a_collection_removes_its_stored_files() {
+    let app = app();
+    mkcol(
+        &app,
+        json!({"name": "purgeme", "schema": [{"name": "doc", "type": "file"}]}),
+    )
+    .await;
+    let (s, v) = upload(
+        &app,
+        "POST",
+        "/api/collections/purgeme/records",
+        Some(ADMIN),
+        &[file("doc", "keep.txt", b"bytes")],
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "upload failed: {v}");
+    let id = v["id"].as_str().unwrap().to_string();
+
+    let dir = sandbox().join("rb_data").join("storage").join("purgeme");
+    assert!(
+        dir.join(&id).join("keep.txt").is_file(),
+        "file should exist before the delete"
+    );
+
+    let (s, _) = call(&app, "DELETE", "/api/collections/purgeme", Some(ADMIN), None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    assert!(
+        !dir.exists(),
+        "collection storage dir survived the delete — uploaded files orphaned at {dir:?}"
+    );
+}

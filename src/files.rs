@@ -90,11 +90,19 @@ fn content_type(name: &str) -> &'static str {
 /// identifier. Every disk path goes through here, so the guard cannot be forgotten
 /// at a call site.
 fn record_dir(col: &str, id: &str) -> Option<PathBuf> {
-    if !ident_ok(col) || !ident_ok(id) {
+    if !ident_ok(id) {
+        return None;
+    }
+    Some(collection_dir(col)?.join(id))
+}
+
+/// `<data dir>/storage/{collection}`. Same guard, one level up.
+fn collection_dir(col: &str) -> Option<PathBuf> {
+    if !ident_ok(col) {
         return None;
     }
     let root = std::env::var("RB_DIR").unwrap_or_else(|_| "rb_data".into());
-    Some(PathBuf::from(root).join("storage").join(col).join(id))
+    Some(PathBuf::from(root).join("storage").join(col))
 }
 
 fn mp_err(e: axum::extract::multipart::MultipartError) -> (StatusCode, Json<Value>) {
@@ -220,6 +228,15 @@ pub fn write_files(col: &str, id: &str, files: &[FilePart]) -> Result<(), (Statu
 /// back, and unlinking files is not something a rollback can undo.
 pub fn remove_record_files(col: &str, id: &str) {
     if let Some(dir) = record_dir(col, id) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Drop every uploaded file belonging to a collection. Deleting a collection removes
+/// its row and its records, so without this the storage directory is orphaned on disk
+/// forever with no API left that could reach it.
+pub fn remove_collection_files(col: &str) {
+    if let Some(dir) = collection_dir(col) {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
