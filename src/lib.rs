@@ -6,6 +6,7 @@ pub mod backup;
 pub mod batch;
 pub mod collections;
 pub mod db;
+pub mod files;
 pub mod filter;
 pub mod records;
 pub mod realtime;
@@ -137,6 +138,10 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
             post(auth::auth_with_password),
         )
         .route("/api/collections/{name}/auth-refresh", post(auth::auth_refresh))
+        .route(
+            "/api/files/{collection}/{id}/{filename}",
+            get(files::file_serve),
+        )
         .route("/api/backups", get(backup::backup_download))
         .route("/api/realtime", get(realtime::realtime))
         // ponytail: three literal routes, no wildcard — one HTML file is the whole UI.
@@ -144,6 +149,9 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
         .route("/_", get(admin_ui))
         .route("/_/", get(admin_ui))
         .route("/_/index.html", get(admin_ui))
+        // axum's default is 2MB; this raises it and caps multipart uploads, which
+        // turn into 413 mid-stream — before the row or the bytes are written
+        .layer(axum::extract::DefaultBodyLimit::max(files::MAX_BODY))
         .layer(axum::middleware::from_fn(cors_and_log))
         .with_state(app)
 }

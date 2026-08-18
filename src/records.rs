@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -9,6 +9,7 @@ use serde_json::{json, Map, Value};
 
 use crate::auth::{who, Who};
 use crate::db::{get_collection, now};
+use crate::files::{check_file_fields, read_body, remove_record_files, write_files};
 use crate::rules::{
     auth_id, check_rule, compile_rule, deny, eval_rule_mem, CREATE, DELETE, LIST, UPDATE, VIEW,
 };
@@ -56,6 +57,8 @@ pub fn validate(
                     "bool" => v.is_boolean(),
                     // an id string; existence is a DB question, checked by check_relations
                     "relation" => v.is_string(),
+                    // the stored value of a file field is the bare filename
+                    "file" => v.is_string(),
                     _ => true, // json = anything
                 };
             if !ok {
@@ -221,7 +224,7 @@ pub async fn records_list(
 }
 
 /// Enforce a row-level rule against one existing record.
-fn gate_record(
+pub(crate) fn gate_record(
     db: &Connection,
     w: &Who,
     rule: &Option<String>,
@@ -492,13 +495,23 @@ pub async fn record_create(
     State(app): State<S>,
     Path(name): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    req: Request,
 ) -> Reply {
     // who() takes the db lock itself, so it must run before we do
     let w = who(&app, &headers);
+    // every await happens here, before the lock: JSON body or multipart, same shape
+    let up = read_body(req, &app).await?;
     let db = app.db.lock().unwrap();
-    let (rec, event) = create_core(&db, &w, &name, &body)?;
+    if !up.files.is_empty() {
+        let Some(col) = get_collection(&db, &name) else {
+            return Err(err(StatusCode::NOT_FOUND, "no such collection"));
+        };
+        check_file_fields(&col.schema, &up.files)?;
+    }
+    let (rec, event) = create_core(&db, &w, &name, &up.data)?;
     drop(db);
+    // only after the row exists: a rule-denied create must leave nothing on disk
+    write_files(&name, rec["id"].as_str().unwrap_or_default(), &up.files)?;
     broadcast_change(&app, event);
     Ok(Json(rec))
 }
@@ -529,12 +542,21 @@ pub async fn record_update(
     State(app): State<S>,
     Path((name, id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    req: Request,
 ) -> Reply {
     let w = who(&app, &headers);
+    let up = read_body(req, &app).await?;
     let db = app.db.lock().unwrap();
-    let (rec, event) = update_core(&db, &w, &name, &id, &body)?;
+    if !up.files.is_empty() {
+        let Some(col) = get_collection(&db, &name) else {
+            return Err(err(StatusCode::NOT_FOUND, "no such collection"));
+        };
+        check_file_fields(&col.schema, &up.files)?;
+    }
+    let (rec, event) = update_core(&db, &w, &name, &id, &up.data)?;
     drop(db);
+    // a denied PATCH returns above, so it can never overwrite the stored bytes
+    write_files(&name, &id, &up.files)?;
     broadcast_change(&app, event);
     Ok(Json(rec))
 }
@@ -548,6 +570,7 @@ pub async fn record_delete(
     let db = app.db.lock().unwrap();
     let (out, event) = delete_core(&db, &w, &name, &id)?;
     drop(db);
+    remove_record_files(&name, &id);
     broadcast_change(&app, event);
     Ok(Json(out))
 }

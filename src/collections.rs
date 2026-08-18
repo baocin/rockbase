@@ -37,10 +37,10 @@ fn schema_ok(schema: &Value) -> Result<&Vec<Value>, (StatusCode, Json<Value>)> {
     for f in fields {
         let fname = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
         let fty = f.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if !ident_ok(fname) || !["text", "number", "bool", "json", "relation"].contains(&fty) {
+        if !ident_ok(fname) || !["text", "number", "bool", "json", "relation", "file"].contains(&fty) {
             return Err(err(
                 StatusCode::BAD_REQUEST,
-                "schema fields need valid name and type in text|number|bool|json|relation",
+                "schema fields need valid name and type in text|number|bool|json|relation|file",
             ));
         }
         // A relation needs a usable target name. Target existence is NOT checked here:
