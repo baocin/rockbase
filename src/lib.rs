@@ -46,6 +46,41 @@ async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+// ponytail: permissive CORS (allow *, no credentials), split per-origin if anyone needs cookies.
+// Also the request log — same wrap, so one layer instead of two.
+async fn cors_and_log(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let start = std::time::Instant::now();
+    // preflight short-circuits before routing, so unregistered OPTIONS is 204, not 404/405
+    let mut resp = if method == axum::http::Method::OPTIONS {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+    let hv = axum::http::HeaderValue::from_static;
+    let h = resp.headers_mut();
+    h.insert("access-control-allow-origin", hv("*"));
+    h.insert(
+        "access-control-allow-methods",
+        hv("GET, POST, PATCH, DELETE, OPTIONS"),
+    );
+    h.insert(
+        "access-control-allow-headers",
+        hv("Authorization, Content-Type"),
+    );
+    println!(
+        "{method} {path} {} {}ms",
+        resp.status().as_u16(),
+        start.elapsed().as_millis()
+    );
+    resp
+}
+
 pub fn build_app(conn: Connection, admin_token: String) -> Router {
     db::harden(&conn);
     db::init_db(&conn);
@@ -93,5 +128,6 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
         .route("/api/collections/{name}/auth-refresh", post(auth::auth_refresh))
         .route("/api/backups", get(backup::backup_download))
         .route("/api/realtime", get(realtime::realtime))
+        .layer(axum::middleware::from_fn(cors_and_log))
         .with_state(app)
 }
