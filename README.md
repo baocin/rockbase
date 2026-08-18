@@ -7,7 +7,7 @@ admin UI.
 
 It is not PocketBase. It reproduces the parts of PocketBase's HTTP shape that this
 codebase implements, and nothing else. The source is ~2,300 lines across twelve
-modules in `src/`; the behavior below is what those modules and the 114 tests do.
+modules in `src/`; the behavior below is what those modules and the 124 tests do.
 
 > The documents in `specs/` are historical. They describe an earlier single-file
 > design, predate per-collection rules, and in three places recommend behavior that
@@ -45,8 +45,11 @@ logged as one line: `GET /api/health 200 1ms`.
 compiled in with `include_str!`). It serves byte-identical HTML to everyone; no secret
 is ever templated into it. You paste the admin token into the login box and it is kept
 in `localStorage` under `rb_admin_token`. It can create/browse collections, page through
-and edit records, and shows a live event feed. That feed is labelled "guest view" for the
-reason in [Limitations](#known-limitations).
+and edit records, and shows a live event feed. The feed opens
+`new EventSource('/api/realtime?token=<admin token>')` (see [Realtime](#realtime)), so it
+sees every collection rather than only guest-visible ones. That is the only place the
+dashboard puts the token in a URL, and it is why `?token=` is accepted on
+`/api/realtime` alone and never on the REST API.
 
 Only `/_`, `/_/` and `/_/index.html` are served. There is no wildcard under `/_/`.
 
@@ -62,6 +65,10 @@ Two credential shapes, both in the `Authorization` header:
   the token is looked up; **a deleted user's token behaves exactly like no token.**
 
 Anything else, including a malformed or expired token, is a guest.
+
+`GET /api/realtime` additionally accepts `?token=<credential>` because browser
+`EventSource` cannot set a header. That fallback is SSE-only — see
+[Realtime](#realtime).
 
 ---
 
@@ -150,7 +157,7 @@ Auth column: **none** = open, **rule** = governed by the collection's API rules 
 | POST | `/api/collections/{name}/auth-refresh` | user | Fresh 7-day token for the same collection |
 | GET | `/api/files/{collection}/{id}/{filename}` | rule (view) | Download an uploaded file |
 | POST | `/api/batch` | user | Up to 50 record writes in one transaction |
-| GET | `/api/realtime` | any (identity read from the header) | SSE change stream. `?topics=a,b` |
+| GET | `/api/realtime` | any (identity from the header, or `?token=` when there is no header) | SSE change stream. `?topics=a,b` |
 | GET | `/api/backups` | admin | `VACUUM INTO` snapshot of the whole database |
 | GET | `/_`, `/_/`, `/_/index.html` | none | Admin UI |
 
@@ -283,7 +290,9 @@ curl -H "Authorization: Bearer $JWT" \
 Stored at `{RB_DIR}/storage/{collection}/{id}/{filename}`. The stored field value is
 the bare sanitized filename. A file part aimed at a non-`file` field is a 400. Bytes are
 written only *after* the row commits, so a rule-denied write leaves nothing on disk.
-Deleting a record removes its file directory.
+Deleting a record removes its file directory, and deleting a collection removes
+`{RB_DIR}/storage/{collection}/` (`files::remove_collection_files`, called after the DB
+lock is dropped — never file IO under the mutex).
 
 Downloads set `X-Content-Type-Options: nosniff` and a content type derived solely from
 the extension — `jpg/jpeg`, `png`, `gif`, `webp`, `pdf`, `txt`, `json`, everything else
@@ -335,6 +344,37 @@ allowlist; empty, whitespace, or comma-only means all topics. The broadcast chan
 
 Every event is filtered per subscriber against the topic collection's **view rule**, and
 admins receive everything.
+
+**`?token=` — the browser fallback.** `EventSource` cannot set an Authorization header,
+so a subscription may carry its credential in the query string instead:
+
+```js
+new EventSource('/api/realtime?token=' + jwt + '&topics=posts')
+```
+
+The value is a bare credential with no scheme prefix — either the admin token or a user
+JWT (`who_from_query_token` in `src/auth.rs` tries admin first, then JWT). A subscriber
+authenticated this way is gated exactly like a header-authenticated one; nothing about
+rule evaluation changes.
+
+Four properties, each pinned by `tests/sse_token.rs`:
+
+- **The header always wins.** If an `Authorization` header is present at all — *even a
+  malformed one* — it alone decides identity and `?token=` is ignored entirely. A token
+  appended by a redirect, a copy-pasted link, or an injected URL can never change who a
+  request is, nor silently upgrade one whose real credential expired.
+- **An invalid token is a guest, not an error.** A bad, expired, or deleted-user token
+  yields `Who::Guest`. It never 401s and never grants more than a guest gets.
+- **It is SSE-only.** `who_from_query_token` is wired into `/api/realtime` and nowhere
+  else. `GET /api/collections?token=<admin>` is still `401`, and
+  `GET /api/collections/posts/records?token=<jwt>` still lists as a guest. A credential
+  in a URL must not become general-purpose auth.
+- **It is not written to the request log.** `cors_and_log` logs `req.uri().path()`, which
+  excludes the query string, so the token never reaches stdout —
+  `request_log_redacts_the_query_token` drives the real binary and asserts it.
+
+A credential in a URL still lands in browser history and can leak via `Referer`, so
+prefer the header wherever you can set one. That is why the admin UI does not use it.
 
 ### Backups
 
@@ -497,12 +537,6 @@ test enforces this mechanically) and no server-side secret is templated into the
 
 Stated plainly, because each one will bite someone.
 
-**Browser `EventSource` cannot set an Authorization header.** There is no query-parameter
-token fallback on `/api/realtime`, so an SSE subscription opened from browser JS is always
-a *guest* subscription and sees only what a guest may see. The admin UI's live feed is
-labelled "guest view" for exactly this reason. Server-side clients and anything that can
-set headers (curl, fetch with a polyfill, a proxy) get their real identity.
-
 **Batch collapses 401/403 into 400, and requires auth before rules run.** `POST /api/batch`
 rejects guests outright with 401 before parsing anything. So a collection with
 `createRule: ""` — public creates — accepts a guest `POST .../records` directly, but the
@@ -541,12 +575,7 @@ conditions cannot currently be expressed. (The *filter* parser is a full express
 
 Smaller ones, from the source:
 
-- On create, schema validation and relation checks run *before* the create rule gate, so a
-  caller who is not allowed to create can still tell a valid body from an invalid one by
-  the 400-vs-401/403 split.
 - One `Mutex<Connection>`. All request handling serializes on it; there is no pool.
-- Deleting a collection removes its records but **not** their files under
-  `{RB_DIR}/storage/{collection}/` — those are orphaned on disk.
 - Replacing an uploaded file leaves the old bytes on disk until the record is deleted.
 - A file write that fails after the row commits leaves a record pointing at a missing file.
 - `PATCH` merges shallowly; nested objects are replaced wholesale, not merged.
@@ -563,22 +592,24 @@ Smaller ones, from the source:
 cargo test
 ```
 
-114 tests, all passing: 11 unit tests inside `src/` and 103 integration tests in `tests/`.
+124 tests, all passing: 11 unit tests inside `src/` and 113 integration tests in `tests/`.
 The integration tests drive the real `Router` through `tower::ServiceExt::oneshot` against
 an in-memory SQLite database, so they exercise the actual middleware stack, not a mock.
 
 | Suite | Tests | Covers |
 | --- | --- | --- |
 | `tests/batch.rs` | 20 | transaction semantics, rollback, the 50-request cap, per-sub-request rule gating |
-| `tests/files.rs` | 19 | multipart upload, download, traversal attempts, content-type handling, 413, rule gating on both directions, file lifecycle |
+| `tests/files.rs` | 20 | multipart upload, download, traversal attempts, content-type handling, 413, rule gating on both directions, file lifecycle |
 | `tests/relations.rs` | 13 | relation validation, `expand` on list and view, expand rule gating, `password_hash` never leaking |
 | `tests/colupdate.rs` | 11 | collection `GET`/`PATCH`, partial rule updates, schema replacement and its effect on existing records |
 | `tests/realtime.rs` | 11 | SSE frame shape, topic filtering, per-subscriber rule gating including delete events |
 | `tests/rules.rs` | 10 | rule defaults per type, NULL/`""`/expression semantics, the 401/403 ladder, admin bypass, rule validation |
+| `tests/sse_token.rs` | 9 | SSE `?token=`: parity with the header, admin and user tokens, header precedence (including a malformed header), invalid token = guest, rule gating, the REST API still refusing it, no token in the request log |
 | `tests/adminui.rs` | 7 | the three admin routes, no wildcard, no secret in the HTML, the asset's own contract |
 | `tests/cli.rs` | 7 | env config, invalid `RB_PORT` aborting startup, CORS preflight, request-log format |
 | `tests/basic.rs` | 5 | end-to-end CRUD, auth, query parameters, backups, WAL persistence |
 | `src/` unit tests | 11 | filter compiler (8), filename sanitizer, reserved-name rejection, `busy_timeout` |
 
-`tests/cli.rs` spawns the real binary as a subprocess and reads its stdout, so it requires
-the binary to build; the rest run in-process.
+`tests/cli.rs` — and `request_log_redacts_the_query_token` in `tests/sse_token.rs` — spawn
+the real binary as a subprocess and read its stdout, so they require the binary to build;
+the rest run in-process.

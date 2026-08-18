@@ -96,10 +96,12 @@ td button { padding: 2px 6px; font-size: 11px; margin-right: 4px; }
     </div>
 
     <div class="panel">
-      <h2>Live feed (guest view)</h2>
+      <h2>Live feed (admin view)</h2>
       <p class="note">EventSource cannot send an Authorization header, so this stream
-        subscribes as a <b>guest</b>. It shows only events from collections whose view
-        rule allows guests — not everything the admin API can read. Last 50 events.</p>
+        authenticates with <code>?token=</code> instead and sees every collection.
+        That is why the token appears in this one URL and nowhere else: the server
+        accepts <code>?token=</code> on <code>/api/realtime</code> only, never on the
+        REST API. Last 50 events.</p>
       <ul id="feed"></ul>
     </div>
 
@@ -301,7 +303,10 @@ function feedLine(text) {
 }
 
 function connectFeed() {
-  const es = new EventSource('/api/realtime');
+  // EventSource cannot set headers, so the credential rides in the query string.
+  // The server honours ?token= on this endpoint only; a header still wins over it.
+  const t = localStorage.getItem('rb_admin_token') || '';
+  const es = new EventSource('/api/realtime?token=' + encodeURIComponent(t));
   es.onmessage = function (ev) {
     let d;
     try { d = JSON.parse(ev.data); } catch (e) { return; }
