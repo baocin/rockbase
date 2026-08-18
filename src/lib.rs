@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod backup;
+pub mod batch;
 pub mod collections;
 pub mod db;
 pub mod filter;
@@ -110,6 +111,7 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
     });
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/batch", post(batch::batch))
         .route(
             "/api/collections",
             get(collections::collections_list).post(collections::collections_create),

@@ -366,19 +366,24 @@ fn hash_password(data: &mut Map<String, Value>) -> Result<(), (StatusCode, Json<
     Ok(())
 }
 
-fn broadcast_change(app: &App, action: &str, topic: &str, record: Value) {
-    let _ = app.events.send(json!({ "action": action, "topic": topic, "record": record }));
+
+/// What one record write produced: the HTTP response body, plus the realtime event
+/// to publish. Cores never lock and never broadcast — the caller does both, which is
+/// what lets a batch buffer the events and publish them only after its tx commits.
+pub type Effect = Result<(Value, Value), (StatusCode, Json<Value>)>;
+
+fn change(action: &str, topic: &str, record: Value) -> Value {
+    json!({ "action": action, "topic": topic, "record": record })
 }
 
-pub async fn record_create(
-    State(app): State<S>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Reply {
-    let w = who(&app, &headers);
-    let db = app.db.lock().unwrap();
-    let Some(col) = get_collection(&db, &name) else {
+pub fn broadcast_change(app: &App, event: Value) {
+    let _ = app.events.send(event);
+}
+
+/// Core of POST /api/collections/{name}/records. Runs against any `&Connection`,
+/// including a `Transaction` (which derefs to one).
+pub fn create_core(db: &Connection, w: &Who, name: &str, body: &Value) -> Effect {
+    let Some(col) = get_collection(db, name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     };
     let (ty, schema) = (col.ty, col.schema);
@@ -387,11 +392,11 @@ pub async fn record_create(
     };
     let is_auth = ty == "auth";
     validate(&schema, &data, is_auth, false).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
-    check_relations(&db, &schema, &data).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    check_relations(db, &schema, &data).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
     // no row exists yet, so the create rule is evaluated in memory, before the insert
-    if let Some(expr) = check_rule(&w, &col.rules[CREATE])? {
-        if !eval_rule_mem(&expr, auth_id(&w), &data) {
-            return Err(deny(&w));
+    if let Some(expr) = check_rule(w, &col.rules[CREATE])? {
+        if !eval_rule_mem(&expr, auth_id(w), &data) {
+            return Err(deny(w));
         }
     }
     if is_auth {
@@ -402,20 +407,99 @@ pub async fn record_create(
         if !data.contains_key("password") {
             return Err(err(StatusCode::BAD_REQUEST, "password required"));
         }
-        if email_taken(&db, &name, email, "") {
+        if email_taken(db, name, email, "") {
             return Err(err(StatusCode::BAD_REQUEST, "email already in use"));
         }
         hash_password(&mut data)?;
     }
     let id = new_id();
-    let ts = now(&db);
+    let ts = now(db);
     db.execute(
         "INSERT INTO records(collection, id, data, created, updated) VALUES(?1, ?2, ?3, ?4, ?4)",
         params![name, id, Value::Object(data.clone()).to_string(), ts],
     )
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let rec = record_json(&name, &id, &Value::Object(data).to_string(), &ts, &ts);
-    broadcast_change(&app, "create", &name, rec.clone());
+    let rec = record_json(name, &id, &Value::Object(data).to_string(), &ts, &ts);
+    Ok((rec.clone(), change("create", name, rec)))
+}
+
+/// Core of PATCH /api/collections/{name}/records/{id}.
+pub fn update_core(db: &Connection, w: &Who, name: &str, id: &str, body: &Value) -> Effect {
+    let Some(col) = get_collection(db, name) else {
+        return Err(err(StatusCode::NOT_FOUND, "no such collection"));
+    };
+    let (ty, schema) = (col.ty, col.schema);
+    let Some((data, created, _)) = fetch_record(db, name, id) else {
+        return Err(err(StatusCode::NOT_FOUND, "record not found"));
+    };
+    gate_record(db, w, &col.rules[UPDATE], name, id)?;
+    let Some(patch) = body.as_object().cloned() else {
+        return Err(err(StatusCode::BAD_REQUEST, "body must be a JSON object"));
+    };
+    let is_auth = ty == "auth";
+    validate(&schema, &patch, is_auth, true).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    check_relations(db, &schema, &patch).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    if is_auth {
+        if let Some(email) = patch.get("email").and_then(|e| e.as_str()) {
+            if !email.contains('@') {
+                return Err(err(StatusCode::BAD_REQUEST, "valid email required"));
+            }
+            if email_taken(db, name, email, id) {
+                return Err(err(StatusCode::BAD_REQUEST, "email already in use"));
+            }
+        }
+    }
+    let mut merged: Map<String, Value> = serde_json::from_str(&data).unwrap_or_default();
+    for (k, v) in patch {
+        merged.insert(k, v); // ponytail: shallow merge, deep merge when nested patches show up
+    }
+    // ponytail: password change via plain PATCH, old-password confirmation skipped;
+    // add an oldPassword check (bcrypt::verify against stored hash) when untrusted
+    // clients can hold long-lived tokens.
+    hash_password(&mut merged)?;
+    let ts = now(db);
+    db.execute(
+        "UPDATE records SET data = ?1, updated = ?2 WHERE collection = ?3 AND id = ?4",
+        params![Value::Object(merged.clone()).to_string(), ts, name, id],
+    )
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let rec = record_json(name, id, &Value::Object(merged).to_string(), &created, &ts);
+    Ok((rec.clone(), change("update", name, rec)))
+}
+
+/// Core of DELETE /api/collections/{name}/records/{id}. Response body is `{}`;
+/// the event still carries the whole record so subscribers can be gated against it.
+pub fn delete_core(db: &Connection, w: &Who, name: &str, id: &str) -> Effect {
+    let Some(col) = get_collection(db, name) else {
+        return Err(err(StatusCode::NOT_FOUND, "no such collection"));
+    };
+    // keep the row: a delete event carries the full record so subscribers can be
+    // rule-gated against it after the row is gone
+    let Some((data, created, updated)) = fetch_record(db, name, id) else {
+        return Err(err(StatusCode::NOT_FOUND, "record not found"));
+    };
+    gate_record(db, w, &col.rules[DELETE], name, id)?;
+    db.execute(
+        "DELETE FROM records WHERE collection = ?1 AND id = ?2",
+        params![name, id],
+    )
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let rec = record_json(name, id, &data, &created, &updated);
+    Ok((json!({}), change("delete", name, rec)))
+}
+
+pub async fn record_create(
+    State(app): State<S>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Reply {
+    // who() takes the db lock itself, so it must run before we do
+    let w = who(&app, &headers);
+    let db = app.db.lock().unwrap();
+    let (rec, event) = create_core(&db, &w, &name, &body)?;
+    drop(db);
+    broadcast_change(&app, event);
     Ok(Json(rec))
 }
 
@@ -449,46 +533,9 @@ pub async fn record_update(
 ) -> Reply {
     let w = who(&app, &headers);
     let db = app.db.lock().unwrap();
-    let Some(col) = get_collection(&db, &name) else {
-        return Err(err(StatusCode::NOT_FOUND, "no such collection"));
-    };
-    let (ty, schema) = (col.ty, col.schema);
-    let Some((data, created, _)) = fetch_record(&db, &name, &id) else {
-        return Err(err(StatusCode::NOT_FOUND, "record not found"));
-    };
-    gate_record(&db, &w, &col.rules[UPDATE], &name, &id)?;
-    let Some(patch) = body.as_object().cloned() else {
-        return Err(err(StatusCode::BAD_REQUEST, "body must be a JSON object"));
-    };
-    let is_auth = ty == "auth";
-    validate(&schema, &patch, is_auth, true).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
-    check_relations(&db, &schema, &patch).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
-    if is_auth {
-        if let Some(email) = patch.get("email").and_then(|e| e.as_str()) {
-            if !email.contains('@') {
-                return Err(err(StatusCode::BAD_REQUEST, "valid email required"));
-            }
-            if email_taken(&db, &name, email, &id) {
-                return Err(err(StatusCode::BAD_REQUEST, "email already in use"));
-            }
-        }
-    }
-    let mut merged: Map<String, Value> = serde_json::from_str(&data).unwrap_or_default();
-    for (k, v) in patch {
-        merged.insert(k, v); // ponytail: shallow merge, deep merge when nested patches show up
-    }
-    // ponytail: password change via plain PATCH, old-password confirmation skipped;
-    // add an oldPassword check (bcrypt::verify against stored hash) when untrusted
-    // clients can hold long-lived tokens.
-    hash_password(&mut merged)?;
-    let ts = now(&db);
-    db.execute(
-        "UPDATE records SET data = ?1, updated = ?2 WHERE collection = ?3 AND id = ?4",
-        params![Value::Object(merged.clone()).to_string(), ts, name, id],
-    )
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let rec = record_json(&name, &id, &Value::Object(merged).to_string(), &created, &ts);
-    broadcast_change(&app, "update", &name, rec.clone());
+    let (rec, event) = update_core(&db, &w, &name, &id, &body)?;
+    drop(db);
+    broadcast_change(&app, event);
     Ok(Json(rec))
 }
 
@@ -499,25 +546,8 @@ pub async fn record_delete(
 ) -> Reply {
     let w = who(&app, &headers);
     let db = app.db.lock().unwrap();
-    let Some(col) = get_collection(&db, &name) else {
-        return Err(err(StatusCode::NOT_FOUND, "no such collection"));
-    };
-    // keep the row: a delete event carries the full record so subscribers can be
-    // rule-gated against it after the row is gone
-    let Some((data, created, updated)) = fetch_record(&db, &name, &id) else {
-        return Err(err(StatusCode::NOT_FOUND, "record not found"));
-    };
-    gate_record(&db, &w, &col.rules[DELETE], &name, &id)?;
-    db.execute(
-        "DELETE FROM records WHERE collection = ?1 AND id = ?2",
-        params![name, id],
-    )
-    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    broadcast_change(
-        &app,
-        "delete",
-        &name,
-        record_json(&name, &id, &data, &created, &updated),
-    );
-    Ok(Json(json!({})))
+    let (out, event) = delete_core(&db, &w, &name, &id)?;
+    drop(db);
+    broadcast_change(&app, event);
+    Ok(Json(out))
 }
