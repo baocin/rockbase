@@ -8,6 +8,7 @@ pub mod db;
 pub mod filter;
 pub mod records;
 pub mod realtime;
+pub mod rules;
 
 use std::sync::{Arc, Mutex};
 
@@ -69,7 +70,10 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
             "/api/collections",
             get(collections::collections_list).post(collections::collections_create),
         )
-        .route("/api/collections/{name}", delete(collections::collections_delete))
+        .route(
+            "/api/collections/{name}",
+            delete(collections::collections_delete).patch(collections::collections_update),
+        )
         .route(
             "/api/collections/{name}/records",
             get(records::records_list).post(records::record_create),

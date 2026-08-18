@@ -7,23 +7,63 @@ use rusqlite::params;
 use serde_json::{json, Value};
 
 use crate::auth::require_admin;
+use crate::db::{get_collection, Col};
+use crate::rules::{compile_rule, defaults};
 use crate::{err, ident_ok, Reply, S};
+
+/// The five rules, as (JSON key, SQL column), in LIST/VIEW/CREATE/UPDATE/DELETE order.
+const RULE_KEYS: [(&str, &str); 5] = [
+    ("listRule", "list_rule"),
+    ("viewRule", "view_rule"),
+    ("createRule", "create_rule"),
+    ("updateRule", "update_rule"),
+    ("deleteRule", "delete_rule"),
+];
+
+fn col_json(name: &str, c: &Col) -> Value {
+    let mut out = json!({ "name": name, "type": c.ty, "schema": c.schema });
+    for (i, (key, _)) in RULE_KEYS.iter().enumerate() {
+        out[*key] = json!(c.rules[i]);
+    }
+    out
+}
+
+/// A rule field from a request body. `Ok(None)` = the key was absent (leave alone).
+/// Must be JSON null or a string, and a non-empty string must compile.
+fn read_rule(body: &Value, key: &str) -> Result<Option<Option<String>>, (StatusCode, Json<Value>)> {
+    let Some(v) = body.get(key) else {
+        return Ok(None);
+    };
+    if v.is_null() {
+        return Ok(Some(None));
+    }
+    let bad = || err(StatusCode::BAD_REQUEST, format!("invalid {key}"));
+    let s = v.as_str().ok_or_else(bad)?;
+    // dummy auth id: compilation only proves the shape, never the caller
+    if !s.is_empty() && compile_rule(s, "").is_none() {
+        return Err(bad());
+    }
+    Ok(Some(Some(s.to_string())))
+}
 
 pub async fn collections_list(State(app): State<S>, headers: HeaderMap) -> Reply {
     require_admin(&app, &headers)?;
     let db = app.db.lock().unwrap();
     let mut stmt = db
-        .prepare("SELECT name, type, schema FROM _collections ORDER BY name")
+        .prepare(
+            "SELECT name, type, schema, list_rule, view_rule, create_rule, update_rule, \
+             delete_rule FROM _collections ORDER BY name",
+        )
         .unwrap();
     let items: Vec<Value> = stmt
         .query_map([], |r| {
-            let (name, ty, schema): (String, String, String) =
-                (r.get(0)?, r.get(1)?, r.get(2)?);
-            Ok(json!({
-                "name": name,
-                "type": ty,
-                "schema": serde_json::from_str::<Value>(&schema).unwrap_or(json!([])),
-            }))
+            let name: String = r.get(0)?;
+            let c = Col {
+                ty: r.get(1)?,
+                schema: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default(),
+                rules: [r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?],
+            };
+            Ok(col_json(&name, &c))
         })
         .unwrap()
         .filter_map(|r| r.ok())
@@ -59,17 +99,70 @@ pub async fn collections_create(
             ));
         }
     }
+    // named rules override, absent ones fall back to the type defaults
+    let mut rules = defaults(ty);
+    for (i, (key, _)) in RULE_KEYS.iter().enumerate() {
+        if let Some(r) = read_rule(&body, key)? {
+            rules[i] = r;
+        }
+    }
     let db = app.db.lock().unwrap();
     let n = db
         .execute(
-            "INSERT OR IGNORE INTO _collections(name, type, schema) VALUES(?1, ?2, ?3)",
-            params![name, ty, schema.to_string()],
+            "INSERT OR IGNORE INTO _collections\
+             (name, type, schema, list_rule, view_rule, create_rule, update_rule, delete_rule) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                name,
+                ty,
+                schema.to_string(),
+                rules[0],
+                rules[1],
+                rules[2],
+                rules[3],
+                rules[4]
+            ],
         )
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     if n == 0 {
         return Err(err(StatusCode::BAD_REQUEST, "collection already exists"));
     }
-    Ok(Json(json!({ "name": name, "type": ty, "schema": schema })))
+    Ok(Json(col_json(
+        name,
+        &Col { ty: ty.into(), schema: schema.as_array().cloned().unwrap_or_default(), rules },
+    )))
+}
+
+/// Admin-only rule edits. Only the five rule keys are honored; a key present with
+/// null sets NULL, an absent key is left untouched. Schema/type edits stay out of scope.
+pub async fn collections_update(
+    State(app): State<S>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Reply {
+    require_admin(&app, &headers)?;
+    // validate every named key first, so a rejected write changes nothing
+    let mut updates: Vec<(&str, Option<String>)> = Vec::new();
+    for (key, column) in RULE_KEYS {
+        if let Some(r) = read_rule(&body, key)? {
+            updates.push((column, r));
+        }
+    }
+    let db = app.db.lock().unwrap();
+    if get_collection(&db, &name).is_none() {
+        return Err(err(StatusCode::NOT_FOUND, "no such collection"));
+    }
+    for (column, rule) in updates {
+        // `column` comes from RULE_KEYS, never from the request
+        db.execute(
+            &format!("UPDATE _collections SET {column} = ?1 WHERE name = ?2"),
+            params![rule, name],
+        )
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    let c = get_collection(&db, &name).unwrap();
+    Ok(Json(col_json(&name, &c)))
 }
 
 pub async fn collections_delete(

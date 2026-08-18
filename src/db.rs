@@ -37,6 +37,38 @@ pub fn init_db(conn: &Connection) {
         [],
     )
     .expect("seed users");
+    // after the users seed, so a fresh DB seeds the collection then its rules in one pass
+    migrate_rules(conn);
+}
+
+/// Add the five rule columns and seed per-type defaults, once. The pragma guard means
+/// re-running init never clobbers rules an admin has since edited.
+fn migrate_rules(conn: &Connection) {
+    let migrated: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('_collections') WHERE name = 'list_rule'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("check rule columns");
+    if migrated > 0 {
+        return;
+    }
+    conn.execute_batch(
+        "ALTER TABLE _collections ADD COLUMN list_rule TEXT;
+         ALTER TABLE _collections ADD COLUMN view_rule TEXT;
+         ALTER TABLE _collections ADD COLUMN create_rule TEXT;
+         ALTER TABLE _collections ADD COLUMN update_rule TEXT;
+         ALTER TABLE _collections ADD COLUMN delete_rule TEXT;
+         UPDATE _collections SET list_rule = '', view_rule = '',
+             create_rule = '@request.auth.id != ''''',
+             update_rule = '@request.auth.id != ''''',
+             delete_rule = '@request.auth.id != ''''' WHERE type = 'base';
+         UPDATE _collections SET create_rule = '', list_rule = NULL, view_rule = NULL,
+             update_rule = 'id = @request.auth.id',
+             delete_rule = 'id = @request.auth.id' WHERE type = 'auth';",
+    )
+    .expect("migrate rules");
 }
 
 pub fn param_get_or_create(conn: &Connection, key: &str, default: &str) -> String {
@@ -49,14 +81,28 @@ pub fn param_get_or_create(conn: &Connection, key: &str, default: &str) -> Strin
         .unwrap()
 }
 
-pub fn get_collection(conn: &Connection, name: &str) -> Option<(String, Vec<Value>)> {
+/// A collection row. `rules` is indexed by the LIST/VIEW/CREATE/UPDATE/DELETE
+/// constants in `crate::rules`; None = admin only, Some("") = public.
+pub struct Col {
+    pub ty: String,
+    pub schema: Vec<Value>,
+    pub rules: [Option<String>; 5],
+}
+
+pub fn get_collection(conn: &Connection, name: &str) -> Option<Col> {
     conn.query_row(
-        "SELECT type, schema FROM _collections WHERE name = ?1",
+        "SELECT type, schema, list_rule, view_rule, create_rule, update_rule, delete_rule \
+         FROM _collections WHERE name = ?1",
         [name],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        |r| {
+            Ok(Col {
+                ty: r.get(0)?,
+                schema: serde_json::from_str(&r.get::<_, String>(1)?).unwrap_or_default(),
+                rules: [r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?],
+            })
+        },
     )
     .ok()
-    .map(|(t, s)| (t, serde_json::from_str(&s).unwrap_or_default()))
 }
 
 pub fn now(conn: &Connection) -> String {

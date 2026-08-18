@@ -69,14 +69,6 @@ pub fn require_admin(app: &App, headers: &HeaderMap) -> Result<(), (StatusCode, 
     }
 }
 
-// ponytail: rule = guests read, any authed user or admin writes; per-collection API rules when needed
-pub fn require_writer(app: &App, headers: &HeaderMap) -> Result<Who, (StatusCode, Json<Value>)> {
-    match who(app, headers) {
-        Who::Guest => Err(err(StatusCode::UNAUTHORIZED, "auth required")),
-        w => Ok(w),
-    }
-}
-
 fn make_token(app: &App, col: &str, id: &str) -> Result<String, (StatusCode, Json<Value>)> {
     let exp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 7 * 24 * 3600;
     let claims = Claims { sub: id.into(), col: col.into(), exp };
@@ -116,10 +108,12 @@ pub async fn auth_with_password(
     Json(body): Json<Value>,
 ) -> Reply {
     let db = app.db.lock().unwrap();
-    let Some((ty, _)) = get_collection(&db, &name) else {
+    // ponytail: auth-with-password is deliberately not rule-gated — the login
+    // endpoint has to work before the caller has any identity to test.
+    let Some(col) = get_collection(&db, &name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     };
-    if ty != "auth" {
+    if col.ty != "auth" {
         return Err(err(StatusCode::BAD_REQUEST, "not an auth collection"));
     }
     let identity = body.get("identity").and_then(|v| v.as_str()).unwrap_or("");

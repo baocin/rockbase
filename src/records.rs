@@ -7,8 +7,11 @@ use rusqlite::{params, params_from_iter, Connection};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::auth::require_writer;
+use crate::auth::{who, Who};
 use crate::db::{get_collection, now};
+use crate::rules::{
+    auth_id, check_rule, compile_rule, deny, eval_rule_mem, CREATE, DELETE, LIST, UPDATE, VIEW,
+};
 use crate::{err, ident_ok, App, Reply, S};
 
 fn new_id() -> String {
@@ -100,12 +103,16 @@ pub fn sort_clause(s: &str) -> Option<String> {
 pub async fn records_list(
     State(app): State<S>,
     Path(name): Path<String>,
+    headers: HeaderMap,
     Query(q): Query<ListParams>,
 ) -> Reply {
+    // who() takes the db lock itself, so it must run before we do
+    let w = who(&app, &headers);
     let db = app.db.lock().unwrap();
-    if get_collection(&db, &name).is_none() {
+    let Some(col) = get_collection(&db, &name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
-    }
+    };
+    let rule = check_rule(&w, &col.rules[LIST])?;
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(30).clamp(1, 500);
 
@@ -116,6 +123,15 @@ pub async fn records_list(
             .map_err(|m| err(StatusCode::BAD_REQUEST, format!("invalid filter: {m}")))?;
         where_sql.push_str(&format!(" AND ({frag})"));
         binds.append(&mut fbinds);
+    }
+    // the list rule ANDs into both the COUNT and the page query, so a user
+    // `filter=` can only ever narrow what the rule already allows
+    if let Some(r) = rule {
+        let Some((frag, mut rbinds)) = compile_rule(&r, auth_id(&w)) else {
+            return Err(deny(&w)); // stored rule no longer compiles: fail closed
+        };
+        where_sql.push_str(&format!(" AND ({frag})"));
+        binds.append(&mut rbinds);
     }
     let order = match q.sort.as_deref() {
         // each segment passes ident_ok inside sort_clause before hitting the SQL string
@@ -186,6 +202,39 @@ pub async fn records_list(
     })))
 }
 
+/// Enforce a row-level rule against one existing record.
+fn gate_record(
+    db: &Connection,
+    w: &Who,
+    rule: &Option<String>,
+    name: &str,
+    id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(expr) = check_rule(w, rule)? else {
+        return Ok(());
+    };
+    let Some((frag, rbinds)) = compile_rule(&expr, auth_id(w)) else {
+        return Err(deny(w)); // stored rule no longer compiles: fail closed
+    };
+    let mut binds: Vec<rusqlite::types::Value> = vec![name.to_string().into(), id.to_string().into()];
+    binds.extend(rbinds);
+    let allowed: bool = db
+        .query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM records \
+                 WHERE collection = ? AND id = ? AND {frag})"
+            ),
+            params_from_iter(binds.iter()),
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if allowed {
+        Ok(())
+    } else {
+        Err(deny(w))
+    }
+}
+
 pub(crate) fn fetch_record(
     db: &Connection,
     name: &str,
@@ -233,16 +282,23 @@ pub async fn record_create(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Reply {
-    require_writer(&app, &headers)?;
+    let w = who(&app, &headers);
     let db = app.db.lock().unwrap();
-    let Some((ty, schema)) = get_collection(&db, &name) else {
+    let Some(col) = get_collection(&db, &name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     };
+    let (ty, schema) = (col.ty, col.schema);
     let Some(mut data) = body.as_object().cloned() else {
         return Err(err(StatusCode::BAD_REQUEST, "body must be a JSON object"));
     };
     let is_auth = ty == "auth";
     validate(&schema, &data, is_auth, false).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    // no row exists yet, so the create rule is evaluated in memory, before the insert
+    if let Some(expr) = check_rule(&w, &col.rules[CREATE])? {
+        if !eval_rule_mem(&expr, auth_id(&w), &data) {
+            return Err(deny(&w));
+        }
+    }
     if is_auth {
         let email = data.get("email").and_then(|e| e.as_str()).unwrap_or("");
         if !email.contains('@') {
@@ -268,11 +324,20 @@ pub async fn record_create(
     Ok(Json(rec))
 }
 
-pub async fn record_view(State(app): State<S>, Path((name, id)): Path<(String, String)>) -> Reply {
+pub async fn record_view(
+    State(app): State<S>,
+    Path((name, id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Reply {
+    let w = who(&app, &headers);
     let db = app.db.lock().unwrap();
+    let Some(col) = get_collection(&db, &name) else {
+        return Err(err(StatusCode::NOT_FOUND, "no such collection"));
+    };
     let Some((data, created, updated)) = fetch_record(&db, &name, &id) else {
         return Err(err(StatusCode::NOT_FOUND, "record not found"));
     };
+    gate_record(&db, &w, &col.rules[VIEW], &name, &id)?;
     Ok(Json(record_json(&name, &id, &data, &created, &updated)))
 }
 
@@ -282,14 +347,16 @@ pub async fn record_update(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Reply {
-    require_writer(&app, &headers)?;
+    let w = who(&app, &headers);
     let db = app.db.lock().unwrap();
-    let Some((ty, schema)) = get_collection(&db, &name) else {
+    let Some(col) = get_collection(&db, &name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     };
+    let (ty, schema) = (col.ty, col.schema);
     let Some((data, created, _)) = fetch_record(&db, &name, &id) else {
         return Err(err(StatusCode::NOT_FOUND, "record not found"));
     };
+    gate_record(&db, &w, &col.rules[UPDATE], &name, &id)?;
     let Some(patch) = body.as_object().cloned() else {
         return Err(err(StatusCode::BAD_REQUEST, "body must be a JSON object"));
     };
@@ -329,17 +396,20 @@ pub async fn record_delete(
     Path((name, id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Reply {
-    require_writer(&app, &headers)?;
+    let w = who(&app, &headers);
     let db = app.db.lock().unwrap();
-    let n = db
-        .execute(
-            "DELETE FROM records WHERE collection = ?1 AND id = ?2",
-            params![name, id],
-        )
-        .unwrap();
-    if n == 0 {
+    let Some(col) = get_collection(&db, &name) else {
+        return Err(err(StatusCode::NOT_FOUND, "no such collection"));
+    };
+    if fetch_record(&db, &name, &id).is_none() {
         return Err(err(StatusCode::NOT_FOUND, "record not found"));
     }
+    gate_record(&db, &w, &col.rules[DELETE], &name, &id)?;
+    db.execute(
+        "DELETE FROM records WHERE collection = ?1 AND id = ?2",
+        params![name, id],
+    )
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     broadcast_change(&app, "delete", &json!({ "id": id, "collectionName": name }));
     Ok(Json(json!({})))
 }
