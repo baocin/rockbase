@@ -37,11 +37,26 @@ fn schema_ok(schema: &Value) -> Result<&Vec<Value>, (StatusCode, Json<Value>)> {
     for f in fields {
         let fname = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
         let fty = f.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if !ident_ok(fname) || !["text", "number", "bool", "json"].contains(&fty) {
+        if !ident_ok(fname) || !["text", "number", "bool", "json", "relation"].contains(&fty) {
             return Err(err(
                 StatusCode::BAD_REQUEST,
-                "schema fields need valid name and type in text|number|bool|json",
+                "schema fields need valid name and type in text|number|bool|json|relation",
             ));
+        }
+        // A relation needs a usable target name. Target existence is NOT checked here:
+        // per-write validation already fails closed, and skipping it allows self-relations
+        // and forward references to a collection created later.
+        if fty == "relation" {
+            let target = f
+                .pointer("/options/collection")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
+            if !ident_ok(target) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "relation fields need options.collection naming a target collection",
+                ));
+            }
         }
         // Reserved: record_json always overwrites these with system values, so a field
         // with one of these names would be stored but never returned (silent data loss),

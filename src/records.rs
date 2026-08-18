@@ -54,6 +54,8 @@ pub fn validate(
                     "text" => v.is_string(),
                     "number" => v.is_number(),
                     "bool" => v.is_boolean(),
+                    // an id string; existence is a DB question, checked by check_relations
+                    "relation" => v.is_string(),
                     _ => true, // json = anything
                 };
             if !ok {
@@ -85,6 +87,7 @@ pub struct ListParams {
     fields: Option<String>,
     #[serde(rename = "skipTotal")]
     skip_total: Option<String>,
+    expand: Option<String>,
 }
 
 pub fn sort_clause(s: &str) -> Option<String> {
@@ -183,7 +186,7 @@ pub async fn records_list(
         (page - 1) * per_page
     );
     let mut stmt = db.prepare(&sql).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
-    let items: Vec<Value> = stmt
+    let mut items: Vec<Value> = stmt
         .query_map(params_from_iter(binds.iter()), |r| {
             let (id, data, created, updated): (String, String, String, String) =
                 (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
@@ -191,15 +194,22 @@ pub async fn records_list(
         })
         .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?
         .filter_map(|r| r.ok())
-        .map(|mut item| {
-            if let Some(keep) = &keep_set {
-                if let Value::Object(m) = &mut item {
-                    m.retain(|k, _| k == "id" || keep.contains(k.as_str()));
-                }
-            }
-            item
-        })
         .collect();
+
+    // before the ?fields= projection: expanding needs the raw relation ids, which a
+    // narrow `fields=` would have stripped
+    if let Some(e) = q.expand.as_deref() {
+        expand_records(&db, &w, &col.schema, e, &mut items);
+    }
+    if let Some(keep) = &keep_set {
+        for item in items.iter_mut() {
+            if let Value::Object(m) = item {
+                // `expand` survives the projection: ?fields=id,title&expand=author
+                // asks for both, and dropping one silently would be a lie
+                m.retain(|k, _| k == "id" || k == "expand" || keep.contains(k.as_str()));
+            }
+        }
+    }
 
     Ok(Json(json!({
         "page": page,
@@ -256,6 +266,82 @@ pub(crate) fn fetch_record(
     .ok()
 }
 
+/// Relation values must name an existing record in the TARGET collection. Absent
+/// and null values are fine (`required` is enforced by `validate`); a non-string
+/// already 400'd in `validate`.
+fn check_relations(
+    db: &Connection,
+    schema: &[Value],
+    data: &Map<String, Value>,
+) -> Result<(), String> {
+    for f in schema {
+        if f.get("type").and_then(|t| t.as_str()) != Some("relation") {
+            continue;
+        }
+        let name = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let Some(id) = data.get(name).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let target = f
+            .pointer("/options/collection")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        if fetch_record(db, target, id).is_none() {
+            return Err(format!("field '{name}': no record '{id}' in '{target}'"));
+        }
+    }
+    Ok(())
+}
+
+/// Inline related records under `expand`, one level deep.
+///
+/// Expand is a read amplifier, so every target row is gated by the TARGET
+/// collection's view rule against the SAME caller: it can never surface a record
+/// `GET /api/collections/<target>/records/<id>` would have refused. A hidden,
+/// dangling, null, unknown or non-relation target is silently omitted and the
+/// parent record still returns 200; if nothing resolves there is no `expand` key.
+///
+/// ponytail: N+1 — one fetch + one gate per (row, field). The target collection
+/// row is read once per requested field, not once per row. Batch into
+/// `WHERE id IN (...)` if wide lists ever show up.
+fn expand_records(db: &Connection, w: &Who, schema: &[Value], expand: &str, items: &mut [Value]) {
+    for field in expand.split(',').map(str::trim) {
+        let Some(def) = schema.iter().find(|f| {
+            f.get("name").and_then(|n| n.as_str()) == Some(field)
+                && f.get("type").and_then(|t| t.as_str()) == Some("relation")
+        }) else {
+            continue; // unknown or non-relation name
+        };
+        let target = def
+            .pointer("/options/collection")
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        // one _collections read per requested field; a missing target fails closed
+        let Some(tcol) = get_collection(db, target) else {
+            continue;
+        };
+        for rec in items.iter_mut() {
+            let Some(id) = rec.get(field).and_then(|v| v.as_str()).map(str::to_string) else {
+                continue; // null or absent relation
+            };
+            if gate_record(db, w, &tcol.rules[VIEW], target, &id).is_err() {
+                continue; // caller could not GET it directly, so expand must not hand it over
+            }
+            let Some((data, created, updated)) = fetch_record(db, target, &id) else {
+                continue; // dangling id
+            };
+            // record_json strips password_hash, so auth targets stay scrubbed
+            let row = record_json(target, &id, &data, &created, &updated);
+            if let Some(Value::Object(e)) = rec
+                .as_object_mut()
+                .map(|o| o.entry("expand").or_insert_with(|| json!({})))
+            {
+                e.insert(field.to_string(), row);
+            }
+        }
+    }
+}
+
 fn email_taken(db: &Connection, col: &str, email: &str, exclude_id: &str) -> bool {
     db.query_row(
         "SELECT COUNT(*) FROM records WHERE collection = ?1 \
@@ -301,6 +387,7 @@ pub async fn record_create(
     };
     let is_auth = ty == "auth";
     validate(&schema, &data, is_auth, false).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    check_relations(&db, &schema, &data).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
     // no row exists yet, so the create rule is evaluated in memory, before the insert
     if let Some(expr) = check_rule(&w, &col.rules[CREATE])? {
         if !eval_rule_mem(&expr, auth_id(&w), &data) {
@@ -336,6 +423,7 @@ pub async fn record_view(
     State(app): State<S>,
     Path((name, id)): Path<(String, String)>,
     headers: HeaderMap,
+    Query(q): Query<ListParams>,
 ) -> Reply {
     let w = who(&app, &headers);
     let db = app.db.lock().unwrap();
@@ -346,7 +434,11 @@ pub async fn record_view(
         return Err(err(StatusCode::NOT_FOUND, "record not found"));
     };
     gate_record(&db, &w, &col.rules[VIEW], &name, &id)?;
-    Ok(Json(record_json(&name, &id, &data, &created, &updated)))
+    let mut rec = record_json(&name, &id, &data, &created, &updated);
+    if let Some(e) = q.expand.as_deref() {
+        expand_records(&db, &w, &col.schema, e, std::slice::from_mut(&mut rec));
+    }
+    Ok(Json(rec))
 }
 
 pub async fn record_update(
@@ -370,6 +462,7 @@ pub async fn record_update(
     };
     let is_auth = ty == "auth";
     validate(&schema, &patch, is_auth, true).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
+    check_relations(&db, &schema, &patch).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
     if is_auth {
         if let Some(email) = patch.get("email").and_then(|e| e.as_str()) {
             if !email.contains('@') {
