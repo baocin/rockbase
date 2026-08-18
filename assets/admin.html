@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>rockbase admin</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #14161a; color: #dfe3e8;
+       font: 14px/1.45 system-ui, -apple-system, sans-serif; }
+h1 { font-size: 16px; margin: 0; }
+h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+     color: #8b94a3; margin: 0 0 8px; }
+button, input, select, textarea { font: inherit; color: inherit;
+  background: #1d2027; border: 1px solid #2f3541; border-radius: 4px; padding: 5px 8px; }
+button { cursor: pointer; }
+button:hover:not(:disabled) { background: #262b34; }
+button:disabled { opacity: .4; cursor: default; }
+textarea { font-family: ui-monospace, Menlo, monospace; width: 100%; resize: vertical; }
+a { color: #7aa2f7; cursor: pointer; }
+.note { color: #8b94a3; font-size: 12px; margin: 0 0 8px; }
+.err { color: #f7768e; }
+.ok { color: #9ece6a; }
+#login { max-width: 340px; margin: 12vh auto; display: grid; gap: 10px; }
+#top { display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+       border-bottom: 1px solid #23262e; }
+#top #status { margin-left: auto; font-size: 12px; }
+#grid { display: grid; grid-template-columns: 250px 1fr 300px; gap: 14px; padding: 14px;
+        align-items: start; }
+.panel { background: #181b21; border: 1px solid #23262e; border-radius: 6px; padding: 12px; }
+.colrow { display: flex; gap: 6px; margin-bottom: 4px; }
+.colrow .link { flex: 1; text-align: left; background: none; border: none; padding: 4px 6px; }
+.colrow .link.sel { background: #2a3242; border-radius: 4px; }
+.colrow .del { border: none; background: none; color: #8b94a3; }
+form { display: grid; gap: 6px; margin-top: 12px; }
+table { width: 100%; border-collapse: collapse; font-family: ui-monospace, Menlo, monospace;
+        font-size: 12px; }
+th, td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #23262e;
+         vertical-align: top; word-break: break-all; }
+th { color: #8b94a3; font-weight: 500; }
+td button { padding: 2px 6px; font-size: 11px; margin-right: 4px; }
+#pager { display: flex; gap: 8px; align-items: center; margin-top: 10px;
+         font-size: 12px; color: #8b94a3; }
+#feed { list-style: none; margin: 0; padding: 0; max-height: 70vh; overflow: auto;
+        font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+#feed li { padding: 3px 0; border-bottom: 1px solid #20242c; }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h1>rockbase admin</h1>
+  <p class="note">The admin token is printed by the server on startup. It is stored
+    in this browser only and sent as an <code>Authorization</code> header.</p>
+  <input id="tok" type="password" placeholder="admin token" autocomplete="off">
+  <button id="signin">Login</button>
+  <div id="loginerr" class="err"></div>
+</div>
+
+<div id="app" hidden>
+  <div id="top">
+    <h1>rockbase admin</h1>
+    <span id="cname" class="note">no collection selected</span>
+    <span id="status"></span>
+    <a id="logout">logout</a>
+  </div>
+  <div id="grid">
+
+    <div class="panel">
+      <h2>Collections</h2>
+      <div id="cols"></div>
+      <form id="newcol">
+        <h2>New collection</h2>
+        <input id="ncname" placeholder="name" autocomplete="off">
+        <select id="nctype"><option value="base">base</option><option value="auth">auth</option></select>
+        <textarea id="ncschema" rows="4" spellcheck="false">[]</textarea>
+        <button type="submit">Create</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Records</h2>
+      <textarea id="editor" rows="6" spellcheck="false">{}</textarea>
+      <p class="note">JSON body only — system fields (id, created, updated,
+        collectionName) are rejected by the server, so they are stripped on edit.</p>
+      <button id="new">New</button>
+      <button id="save">Save</button>
+      <table>
+        <thead><tr><th>id</th><th>data</th><th>updated</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div id="pager">
+        <button id="prev">prev</button><span id="page"></span><button id="next">next</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Live feed (guest view)</h2>
+      <p class="note">EventSource cannot send an Authorization header, so this stream
+        subscribes as a <b>guest</b>. It shows only events from collections whose view
+        rule allows guests — not everything the admin API can read. Last 50 events.</p>
+      <ul id="feed"></ul>
+    </div>
+
+  </div>
+</div>
+
+<script>
+'use strict';
+const $ = function (id) { return document.getElementById(id); };
+function el(tag, text) {
+  const e = document.createElement(tag);
+  if (text !== undefined) { e.textContent = text; }
+  return e;
+}
+
+const SYS = ['id', 'collectionName', 'created', 'updated'];
+function fields(rec) {
+  const o = {};
+  for (const k of Object.keys(rec)) { if (SYS.indexOf(k) < 0) { o[k] = rec[k]; } }
+  return o;
+}
+
+let current = { name: null, type: null, page: 1 };
+let editing = null; // record id being edited, null = create
+
+function status(msg, bad) {
+  const s = $('status');
+  s.textContent = msg || '';
+  s.className = bad ? 'err' : 'ok';
+}
+
+async function api(method, path, body) {
+  const headers = { 'Authorization': 'Admin ' + (localStorage.getItem('rb_admin_token') || '') };
+  if (body) { headers['Content-Type'] = 'application/json'; }
+  const r = await fetch(path, { method: method, headers: headers,
+    body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(function () { return {}; });
+  if (!r.ok) { throw new Error(j.message || 'HTTP ' + r.status); }
+  return j;
+}
+
+function recPath(name, id) {
+  let p = '/api/collections/' + encodeURIComponent(name) + '/records';
+  if (id) { p += '/' + encodeURIComponent(id); }
+  return p;
+}
+
+// ---- login ----------------------------------------------------------------
+
+async function tryToken(t) {
+  localStorage.setItem('rb_admin_token', t);
+  try {
+    await api('GET', '/api/collections');
+    return true;
+  } catch (e) {
+    localStorage.removeItem('rb_admin_token');
+    return false;
+  }
+}
+
+async function signin() {
+  $('loginerr').textContent = '';
+  if (await tryToken($('tok').value.trim())) { start(); }
+  else { $('loginerr').textContent = 'invalid token'; }
+}
+
+function start() {
+  $('login').hidden = true;
+  $('app').hidden = false;
+  connectFeed();
+  loadCollections();
+}
+
+// ---- collections ----------------------------------------------------------
+
+async function loadCollections() {
+  let items = [];
+  try { items = (await api('GET', '/api/collections')).items || []; }
+  catch (e) { return status(e.message, true); }
+  const list = $('cols');
+  list.textContent = '';
+  for (const c of items) {
+    const row = el('div');
+    row.className = 'colrow';
+    const pick = el('button', c.name + '  (' + c.type + ')');
+    pick.className = 'link' + (c.name === current.name ? ' sel' : '');
+    pick.onclick = function () { select(c); };
+    const del = el('button', 'x');
+    del.className = 'del';
+    del.title = 'delete collection';
+    del.onclick = function () { delCollection(c.name); };
+    row.append(pick, del);
+    list.append(row);
+  }
+}
+
+function select(c) {
+  current = { name: c.name, type: c.type, page: 1 };
+  editing = null;
+  $('editor').value = '{}';
+  $('cname').textContent = c.name + ' · ' + c.type;
+  loadCollections();
+  loadRecords();
+}
+
+async function delCollection(name) {
+  if (!confirm('Delete collection ' + name + ' and all its records?')) { return; }
+  try { await api('DELETE', '/api/collections/' + encodeURIComponent(name)); }
+  catch (e) { return status(e.message, true); }
+  if (current.name === name) {
+    current = { name: null, type: null, page: 1 };
+    $('rows').textContent = '';
+    $('page').textContent = '';
+    $('cname').textContent = 'no collection selected';
+  }
+  status('deleted ' + name);
+  loadCollections();
+}
+
+async function createCollection(ev) {
+  ev.preventDefault();
+  let schema;
+  try { schema = JSON.parse($('ncschema').value); }
+  catch (e) { return status('invalid JSON in schema', true); }
+  const body = { name: $('ncname').value.trim(), type: $('nctype').value, schema: schema };
+  try { await api('POST', '/api/collections', body); }
+  catch (e) { return status(e.message, true); }
+  status('created ' + body.name);
+  $('ncname').value = '';
+  $('ncschema').value = '[]';
+  loadCollections();
+}
+
+// ---- records --------------------------------------------------------------
+
+async function loadRecords() {
+  if (!current.name) { return; }
+  let res;
+  try {
+    res = await api('GET', recPath(current.name) + '?page=' + current.page + '&perPage=30');
+  } catch (e) { return status(e.message, true); }
+  const tb = $('rows');
+  tb.textContent = '';
+  for (const rec of res.items || []) {
+    const tr = el('tr');
+    tr.append(el('td', rec.id));
+    const j = JSON.stringify(fields(rec));
+    tr.append(el('td', j.length > 120 ? j.slice(0, 120) + '…' : j));
+    tr.append(el('td', rec.updated || ''));
+    const act = el('td');
+    const edit = el('button', 'edit');
+    edit.onclick = function () {
+      editing = rec.id;
+      $('editor').value = JSON.stringify(fields(rec), null, 2);
+      status('editing ' + rec.id);
+    };
+    const del = el('button', 'del');
+    del.onclick = function () { delRecord(rec.id); };
+    act.append(edit, del);
+    tr.append(act);
+    tb.append(tr);
+  }
+  $('page').textContent = 'page ' + res.page + ' of ' + res.totalPages +
+    ' (' + res.totalItems + ' items)';
+  $('prev').disabled = res.page <= 1;
+  $('next').disabled = res.page >= res.totalPages;
+}
+
+async function delRecord(id) {
+  if (!confirm('Delete record ' + id + '?')) { return; }
+  try { await api('DELETE', recPath(current.name, id)); }
+  catch (e) { return status(e.message, true); }
+  if (editing === id) { editing = null; $('editor').value = '{}'; }
+  status('deleted ' + id);
+  loadRecords();
+}
+
+async function save() {
+  if (!current.name) { return status('select a collection first', true); }
+  let obj;
+  try { obj = JSON.parse($('editor').value); }
+  catch (e) { return status('invalid JSON', true); }
+  try {
+    if (editing) { await api('PATCH', recPath(current.name, editing), obj); }
+    else { await api('POST', recPath(current.name), obj); }
+  } catch (e) { return status(e.message, true); }
+  status(editing ? 'updated' : 'created');
+  editing = null;
+  $('editor').value = '{}';
+  loadRecords();
+}
+
+// ---- live feed ------------------------------------------------------------
+
+function feedLine(text) {
+  const f = $('feed');
+  f.prepend(el('li', text));
+  while (f.children.length > 50) { f.removeChild(f.lastChild); }
+}
+
+function connectFeed() {
+  const es = new EventSource('/api/realtime');
+  es.onmessage = function (ev) {
+    let d;
+    try { d = JSON.parse(ev.data); } catch (e) { return; }
+    if (!d.action) { return; } // first frame is the clientId handshake
+    feedLine(d.action + '  ' + (d.topic || '') + '  ' + ((d.record && d.record.id) || ''));
+  };
+  // EventSource reconnects on its own; just say so once per drop.
+  es.onerror = function () { feedLine('(disconnected, retrying)'); };
+}
+
+// ---- wiring ---------------------------------------------------------------
+
+$('signin').onclick = signin;
+$('tok').onkeydown = function (e) { if (e.key === 'Enter') { signin(); } };
+$('logout').onclick = function () {
+  localStorage.removeItem('rb_admin_token');
+  location.reload();
+};
+$('newcol').onsubmit = createCollection;
+$('new').onclick = function () { editing = null; $('editor').value = '{}'; status('new record'); };
+$('save').onclick = save;
+$('prev').onclick = function () { if (current.page > 1) { current.page--; loadRecords(); } };
+$('next').onclick = function () { current.page++; loadRecords(); };
+
+(async function () {
+  const t = localStorage.getItem('rb_admin_token');
+  if (t && await tryToken(t)) { start(); }
+})();
+</script>
+</body>
+</html>

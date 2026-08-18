@@ -46,6 +46,15 @@ async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+// Compile-time constant on purpose: nothing runtime (admin token, jwt secret) is ever
+// templated into it, so every server serves byte-identical HTML. The token is typed
+// by the user in the browser and kept in localStorage.
+const ADMIN_HTML: &str = include_str!("../assets/admin.html");
+
+async fn admin_ui() -> axum::response::Html<&'static str> {
+    axum::response::Html(ADMIN_HTML)
+}
+
 // ponytail: permissive CORS (allow *, no credentials), split per-origin if anyone needs cookies.
 // Also the request log — same wrap, so one layer instead of two.
 async fn cors_and_log(
@@ -128,6 +137,11 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
         .route("/api/collections/{name}/auth-refresh", post(auth::auth_refresh))
         .route("/api/backups", get(backup::backup_download))
         .route("/api/realtime", get(realtime::realtime))
+        // ponytail: three literal routes, no wildcard — one HTML file is the whole UI.
+        // axum 0.8 does not redirect trailing slashes, so `/_` and `/_/` are both real.
+        .route("/_", get(admin_ui))
+        .route("/_/", get(admin_ui))
+        .route("/_/index.html", get(admin_ui))
         .layer(axum::middleware::from_fn(cors_and_log))
         .with_state(app)
 }
