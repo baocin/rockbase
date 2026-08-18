@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     http::StatusCode,
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use rusqlite::Connection;
@@ -72,7 +72,9 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
         )
         .route(
             "/api/collections/{name}",
-            delete(collections::collections_delete).patch(collections::collections_update),
+            get(collections::collections_get)
+                .patch(collections::collections_update)
+                .delete(collections::collections_delete),
         )
         .route(
             "/api/collections/{name}/records",

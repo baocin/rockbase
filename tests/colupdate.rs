@@ -110,10 +110,16 @@ async fn get_collection_returns_full_shape() {
     assert_eq!(field_names(&v), ["title", "views"]);
     assert_eq!(v["schema"][0]["required"], json!(true));
     assert_eq!(v["schema"][1]["type"], "number");
-    // rules are present keys, all null on a fresh collection
+    // Rules carry per-type defaults, they are not null on a fresh collection.
+    // Authoritative source: tests/rules.rs::rule_defaults_per_type.
+    // (specs/colupdate.md predates the rules feature and showed all-null here.)
     for k in RULES {
         assert!(v.get(k).is_some(), "missing rule key {k} in {v}");
-        assert!(v[k].is_null(), "rule {k} should be null, got {}", v[k]);
+    }
+    assert_eq!(v["listRule"], json!(""));
+    assert_eq!(v["viewRule"], json!(""));
+    for k in ["createRule", "updateRule", "deleteRule"] {
+        assert_eq!(v[k], json!("@request.auth.id != ''"), "rule {k} in {v}");
     }
 
     // the seeded auth collection reports its type too
@@ -207,8 +213,10 @@ async fn patch_replaces_schema_and_merges_rules() {
         "title should no longer be required: {v}"
     );
     assert_eq!(v["listRule"], json!(""));
-    for k in ["viewRule", "createRule", "updateRule", "deleteRule"] {
-        assert!(v[k].is_null(), "rule {k} should still be null, got {}", v[k]);
+    // untouched rules keep their base defaults (not null — see rules.rs)
+    assert_eq!(v["viewRule"], json!(""));
+    for k in ["createRule", "updateRule", "deleteRule"] {
+        assert_eq!(v[k], json!("@request.auth.id != ''"), "rule {k} unchanged in {v}");
     }
 
     // a second PATCH touching one rule leaves listRule alone

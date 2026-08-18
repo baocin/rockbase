@@ -143,6 +143,11 @@ pub async fn records_list(
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, "bad sort field"))?,
         None => "created ASC".to_string(),
     };
+    // Stable tiebreak. Inserts routinely land inside the same millisecond, and ids are
+    // random uuids, so neither `created` nor `id` orders them by insertion. SQLite's
+    // rowid increments per insert, so it is both unique and chronological — without it
+    // tied rows come back in arbitrary order and pagination repeats or skips records.
+    let order = format!("{order}, rowid ASC");
 
     let keep_set: Option<std::collections::HashSet<&str>> = match q.fields.as_deref() {
         Some(f) => {

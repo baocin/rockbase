@@ -106,7 +106,11 @@ pub fn get_collection(conn: &Connection, name: &str) -> Option<Col> {
 }
 
 pub fn now(conn: &Connection) -> String {
-    conn.query_row("SELECT datetime('now')", [], |r| r.get(0)).unwrap()
+    // Millisecond resolution, fixed width, so lexicographic ordering == chronological.
+    // Plain datetime('now') is second-resolution: records created in the same second
+    // tied under ORDER BY created, and pagination could repeat or skip rows.
+    conn.query_row("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')", [], |r| r.get(0))
+        .unwrap()
 }
 
 #[cfg(test)]

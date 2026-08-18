@@ -28,6 +28,25 @@ fn col_json(name: &str, c: &Col) -> Value {
     out
 }
 
+/// The field array of a schema value, or 400. Shared by create and update so the
+/// two can never drift.
+fn schema_ok(schema: &Value) -> Result<&Vec<Value>, (StatusCode, Json<Value>)> {
+    let Some(fields) = schema.as_array() else {
+        return Err(err(StatusCode::BAD_REQUEST, "schema must be an array"));
+    };
+    for f in fields {
+        let fname = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let fty = f.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if !ident_ok(fname) || !["text", "number", "bool", "json"].contains(&fty) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "schema fields need valid name and type in text|number|bool|json",
+            ));
+        }
+    }
+    Ok(fields)
+}
+
 /// A rule field from a request body. `Ok(None)` = the key was absent (leave alone).
 /// Must be JSON null or a string, and a non-empty string must compile.
 fn read_rule(body: &Value, key: &str) -> Result<Option<Option<String>>, (StatusCode, Json<Value>)> {
@@ -86,19 +105,7 @@ pub async fn collections_create(
         return Err(err(StatusCode::BAD_REQUEST, "type must be 'base' or 'auth'"));
     }
     let schema = body.get("schema").cloned().unwrap_or(json!([]));
-    let Some(fields) = schema.as_array() else {
-        return Err(err(StatusCode::BAD_REQUEST, "schema must be an array"));
-    };
-    for f in fields {
-        let fname = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        let fty = f.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if !ident_ok(fname) || !["text", "number", "bool", "json"].contains(&fty) {
-            return Err(err(
-                StatusCode::BAD_REQUEST,
-                "schema fields need valid name and type in text|number|bool|json",
-            ));
-        }
-    }
+    schema_ok(&schema)?;
     // named rules override, absent ones fall back to the type defaults
     let mut rules = defaults(ty);
     for (i, (key, _)) in RULE_KEYS.iter().enumerate() {
@@ -133,8 +140,24 @@ pub async fn collections_create(
     )))
 }
 
-/// Admin-only rule edits. Only the five rule keys are honored; a key present with
-/// null sets NULL, an absent key is left untouched. Schema/type edits stay out of scope.
+pub async fn collections_get(
+    State(app): State<S>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Reply {
+    require_admin(&app, &headers)?;
+    let db = app.db.lock().unwrap();
+    let Some(c) = get_collection(&db, &name) else {
+        return Err(err(StatusCode::NOT_FOUND, "no such collection"));
+    };
+    Ok(Json(col_json(&name, &c)))
+}
+
+/// Admin-only edits: the five rule keys plus a wholesale `schema` replacement.
+/// A rule key present with null sets NULL, an absent key is left untouched.
+/// `name`/`type` are rejected outright; any other key is ignored.
+///
+/// ponytail: removed fields linger in stored JSON; a cleanup sweep over records is the upgrade
 pub async fn collections_update(
     State(app): State<S>,
     headers: HeaderMap,
@@ -143,12 +166,22 @@ pub async fn collections_update(
 ) -> Reply {
     require_admin(&app, &headers)?;
     // validate every named key first, so a rejected write changes nothing
+    if body.get("name").is_some() || body.get("type").is_some() {
+        return Err(err(StatusCode::BAD_REQUEST, "name/type cannot be changed"));
+    }
     let mut updates: Vec<(&str, Option<String>)> = Vec::new();
     for (key, column) in RULE_KEYS {
         if let Some(r) = read_rule(&body, key)? {
             updates.push((column, r));
         }
     }
+    let schema = match body.get("schema") {
+        Some(s) => {
+            schema_ok(s)?;
+            Some(s.to_string())
+        }
+        None => None,
+    };
     let db = app.db.lock().unwrap();
     if get_collection(&db, &name).is_none() {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
@@ -158,6 +191,13 @@ pub async fn collections_update(
         db.execute(
             &format!("UPDATE _collections SET {column} = ?1 WHERE name = ?2"),
             params![rule, name],
+        )
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    if let Some(s) = schema {
+        db.execute(
+            "UPDATE _collections SET schema = ?1 WHERE name = ?2",
+            params![s, name],
         )
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
