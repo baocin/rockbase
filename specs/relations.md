@@ -1,3 +1,9 @@
+> **HISTORICAL — superseded by the code and tests.**
+> This was a design input, written when the whole crate was a single `src/main.rs`.
+> The crate is now modular (`src/lib.rs` + modules), so every file-layout claim below
+> is wrong. The authoritative specification is `tests/relations.rs` plus the source.
+> Do not implement from this document.
+
 # Spec: Relation fields + expand
 
 All changes live in `src/main.rs` (the whole app is one file). No new dependencies, no schema

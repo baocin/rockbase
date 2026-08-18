@@ -1,3 +1,9 @@
+> **HISTORICAL — superseded by the code and tests.**
+> This was a design input, written when the whole crate was a single `src/main.rs`.
+> The crate is now modular (`src/lib.rs` + modules), so every file-layout claim below
+> is wrong. The authoritative specification is `tests/adminui.rs` plus the source.
+> Do not implement from this document.
+
 # Spec: Embedded admin dashboard
 
 Feature: a single-file admin UI served at `/_/`, embedded in the binary with

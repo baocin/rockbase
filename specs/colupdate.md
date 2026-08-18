@@ -1,3 +1,9 @@
+> **HISTORICAL — superseded by the code and tests.**
+> This was a design input, written when the whole crate was a single `src/main.rs`.
+> The crate is now modular (`src/lib.rs` + modules), so every file-layout claim below
+> is wrong. The authoritative specification is `tests/colupdate.rs` plus the source.
+> Do not implement from this document.
+
 # Spec: Collection read + schema update
 
 Two admin endpoints on the existing `/api/collections/{name}` route: GET (full collection

@@ -1,3 +1,12 @@
+> **HISTORICAL — superseded, and INCOMPLETE ON SECURITY.**
+> This document predates per-collection API rules and says nothing about gating batch
+> sub-requests. An ungated batch endpoint is privilege escalation: it would let a caller
+> do via `POST /api/batch` what the standalone routes refuse. Sub-requests now run the
+> same `*_core` functions the standalone handlers use. Its prescribed error type
+> (`(StatusCode, String)`) and delete payload are also stale.
+> The authoritative specification is `tests/batch.rs` plus the source.
+> Do not implement from this document.
+
 # Spec: Transactional batch endpoint — POST /api/batch
 
 Status: agreed lazy scope. Everything happens in `src/main.rs` (the whole crate is one file).

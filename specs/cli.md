@@ -1,3 +1,9 @@
+> **HISTORICAL — superseded by the code and tests.**
+> This was a design input, written when the whole crate was a single `src/main.rs`.
+> The crate is now modular (`src/lib.rs` + modules), so every file-layout claim below
+> is wrong. The authoritative specification is `tests/cli.rs` plus the source.
+> Do not implement from this document.
+
 # Spec: Config, CORS, request log, graceful shutdown
 
 Scope: env config (`RB_PORT`, `RB_DIR`), permissive CORS, one-line request log

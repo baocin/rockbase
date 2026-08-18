@@ -1,3 +1,9 @@
+> **HISTORICAL — superseded by the code and tests.**
+> This was a design input, written when the whole crate was a single `src/main.rs`.
+> The crate is now modular (`src/lib.rs` + modules), so every file-layout claim below
+> is wrong. The authoritative specification is `tests/basic.rs` plus the source.
+> Do not implement from this document.
+
 # auth2 — Auth identity, refresh, user existence check
 
 All changes in `src/main.rs`. No new dependencies. No schema changes.

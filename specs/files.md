@@ -1,3 +1,12 @@
+> **HISTORICAL — superseded, and WRONG ON SECURITY.**
+> This document says file downloads need no auth. That was overridden: an unguessable
+> filename is not access control, so downloads are gated by the same `viewRule` as the
+> record. Its `content_type` table also maps `html`/`svg`, which would serve
+> attacker-uploaded markup from the API origin as stored XSS; both were dropped.
+> Also written when the crate was a single `src/main.rs`; the layout claims are wrong.
+> The authoritative specification is `tests/files.rs` plus the source.
+> Do not implement from this document.
+
 # Spec: File uploads and serving
 
 Scope: new `file` schema field type; multipart create/update on records; disk storage under the

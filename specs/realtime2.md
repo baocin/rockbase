@@ -1,3 +1,12 @@
+> **HISTORICAL — superseded, and WRONG ON SECURITY.**
+> This document declares rule-aware filtering "out of scope" and accepts an open leak.
+> That was overridden: `/api/realtime` had been broadcasting every record change to
+> every subscriber including guests, so anyone could watch records `listRule`/`viewRule`
+> hides. Events are now gated by the same rules as reads. Also written when the crate
+> was a single `src/main.rs`; the layout claims are wrong.
+> The authoritative specification is `tests/realtime.rs` plus the source.
+> Do not implement from this document.
+
 # Spec: Realtime topics
 
 Feature: server-side topic filtering for the SSE stream, a `topic` field on every
