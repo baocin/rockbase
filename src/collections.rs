@@ -43,6 +43,16 @@ fn schema_ok(schema: &Value) -> Result<&Vec<Value>, (StatusCode, Json<Value>)> {
                 "schema fields need valid name and type in text|number|bool|json",
             ));
         }
+        // Reserved: record_json always overwrites these with system values, so a field
+        // with one of these names would be stored but never returned (silent data loss),
+        // and rules would resolve it to the data value in memory but to the real column
+        // in SQL — create and update gating would disagree on the same rule.
+        if crate::records::RESERVED_FIELDS.contains(&fname) {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                format!("'{fname}' is a reserved field name"),
+            ));
+        }
     }
     Ok(fields)
 }
@@ -221,4 +231,23 @@ pub async fn collections_delete(
     db.execute("DELETE FROM records WHERE collection = ?1", [&name])
         .unwrap();
     Ok(Json(json!({})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_rejects_reserved_field_names() {
+        for name in crate::records::RESERVED_FIELDS {
+            let schema = json!([{ "name": name, "type": "text" }]);
+            assert!(
+                schema_ok(&schema).is_err(),
+                "'{name}' must be rejected: record_json overwrites it, so it would be \
+                 stored but never returned, and rules would resolve it inconsistently"
+            );
+        }
+        // a normal field still passes
+        assert!(schema_ok(&json!([{ "name": "title", "type": "text" }])).is_ok());
+    }
 }

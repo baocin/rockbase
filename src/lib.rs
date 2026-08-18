@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 pub struct App {
     // ponytail: single Mutex<Connection>, swap for r2d2 pool if concurrency matters
     pub db: Mutex<Connection>,
-    pub events: broadcast::Sender<String>,
+    pub events: broadcast::Sender<Value>,
     pub jwt_secret: String,
     pub admin_token: String,
 }

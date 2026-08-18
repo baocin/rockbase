@@ -18,6 +18,9 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..15].to_string()
 }
 
+/// Names record_json injects from system columns; a schema field may not use them.
+pub const RESERVED_FIELDS: [&str; 5] = ["id", "created", "updated", "collectionName", "password_hash"];
+
 pub fn record_json(collection: &str, id: &str, data: &str, created: &str, updated: &str) -> Value {
     let mut obj: Map<String, Value> = serde_json::from_str(data).unwrap_or_default();
     obj.remove("password_hash");
@@ -277,8 +280,8 @@ fn hash_password(data: &mut Map<String, Value>) -> Result<(), (StatusCode, Json<
     Ok(())
 }
 
-fn broadcast_change(app: &App, action: &str, record: &Value) {
-    let _ = app.events.send(json!({ "action": action, "record": record }).to_string());
+fn broadcast_change(app: &App, action: &str, topic: &str, record: Value) {
+    let _ = app.events.send(json!({ "action": action, "topic": topic, "record": record }));
 }
 
 pub async fn record_create(
@@ -325,7 +328,7 @@ pub async fn record_create(
     )
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let rec = record_json(&name, &id, &Value::Object(data).to_string(), &ts, &ts);
-    broadcast_change(&app, "create", &rec);
+    broadcast_change(&app, "create", &name, rec.clone());
     Ok(Json(rec))
 }
 
@@ -392,7 +395,7 @@ pub async fn record_update(
     )
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let rec = record_json(&name, &id, &Value::Object(merged).to_string(), &created, &ts);
-    broadcast_change(&app, "update", &rec);
+    broadcast_change(&app, "update", &name, rec.clone());
     Ok(Json(rec))
 }
 
@@ -406,15 +409,22 @@ pub async fn record_delete(
     let Some(col) = get_collection(&db, &name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     };
-    if fetch_record(&db, &name, &id).is_none() {
+    // keep the row: a delete event carries the full record so subscribers can be
+    // rule-gated against it after the row is gone
+    let Some((data, created, updated)) = fetch_record(&db, &name, &id) else {
         return Err(err(StatusCode::NOT_FOUND, "record not found"));
-    }
+    };
     gate_record(&db, &w, &col.rules[DELETE], &name, &id)?;
     db.execute(
         "DELETE FROM records WHERE collection = ?1 AND id = ?2",
         params![name, id],
     )
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    broadcast_change(&app, "delete", &json!({ "id": id, "collectionName": name }));
+    broadcast_change(
+        &app,
+        "delete",
+        &name,
+        record_json(&name, &id, &data, &created, &updated),
+    );
     Ok(Json(json!({})))
 }

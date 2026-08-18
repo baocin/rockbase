@@ -114,9 +114,10 @@ fn side_mem(tok: &str, auth_id: &str, data: &Map<String, Value>) -> Option<Value
     if let Ok(f) = tok.parse::<f64>() {
         return Some(json!(f));
     }
+    // id/created/updated are ordinary lookups: absent on create (the row does not
+    // exist yet, so Null like any missing field), present when `data` is a full
+    // record snapshot — which is what realtime gates delete events against.
     match tok {
-        // the row does not exist yet, so these are Null just like a missing field
-        "id" | "created" | "updated" => Some(Value::Null),
         t if ident_ok(t) => Some(data.get(t).cloned().unwrap_or(Value::Null)),
         _ => None,
     }
