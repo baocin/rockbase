@@ -19,6 +19,27 @@ modules in `src/`; the behavior below is what those modules and the 135 tests do
 
 ---
 
+## Install
+
+Download a binary for your platform from [Releases](https://github.com/baocin/rockbase/releases)
+and run it. SQLite is compiled in, so the binary is the whole server — no runtime deps.
+
+```sh
+# linux x86_64 (use -musl for Alpine / FROM scratch)
+curl -fsSL https://github.com/baocin/rockbase/releases/latest/download/rockbase-x86_64-unknown-linux-gnu.tar.gz | tar xz
+./rockbase-x86_64-unknown-linux-gnu/rockbase
+```
+
+Builds are published for linux (gnu + musl, x86_64 and arm64), macOS (arm64 and
+x86_64) and Windows x86_64. Every archive ships a `.sha256` next to it.
+
+Or build from source — needs a C compiler, since `rusqlite`'s `bundled` feature
+compiles SQLite:
+
+```sh
+cargo build --release   # -> target/release/rockbase
+```
+
 ## Running it
 
 ```
