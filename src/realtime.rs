@@ -8,7 +8,10 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio_stream::{wrappers::BroadcastStream, StreamExt};
+use tokio_stream::{
+    wrappers::{errors::BroadcastStreamRecvError, BroadcastStream},
+    StreamExt,
+};
 
 use crate::auth::{who, who_from_query_token, Who};
 use crate::db::get_collection;
@@ -97,7 +100,17 @@ pub async fn realtime(
             .data(json!({ "clientId": uuid::Uuid::new_v4().simple().to_string() }).to_string()),
     ));
     let changes = BroadcastStream::new(rx).filter_map(move |m| {
-        let ev = m.ok()?;
+        let ev = match m {
+            Ok(ev) => ev,
+            // The subscriber fell behind and tokio dropped the oldest events. Tell it.
+            // Swallowing this leaves a client silently out of sync, which is worse than
+            // a dropped connection: it cannot know it needs to refetch. The COUNT is not
+            // sensitive; the missed records are, and they are simply gone — nothing is
+            // replayed past the rule gate to reconstruct them.
+            Err(BroadcastStreamRecvError::Lagged(n)) => {
+                return Some(Ok(Event::default().data(json!({ "lagged": n }).to_string())));
+            }
+        };
         let topic = ev.get("topic")?.as_str()?.to_string();
         if !topics.is_empty() && !topics.contains(&topic) {
             return None;

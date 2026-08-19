@@ -72,8 +72,12 @@ async fn call(
 
 async fn health_json(app: &Router) -> (StatusCode, Value) {
     let (s, _, body) = call(app, "GET", "/api/health", &[], None).await;
-    let v = serde_json::from_slice(&body)
-        .unwrap_or_else(|e| panic!("health body is not JSON ({e}): {:?}", String::from_utf8_lossy(&body)));
+    let v = serde_json::from_slice(&body).unwrap_or_else(|e| {
+        panic!(
+            "health body is not JSON ({e}): {:?}",
+            String::from_utf8_lossy(&body)
+        )
+    });
     (s, v)
 }
 
@@ -109,7 +113,8 @@ async fn health_answer_comes_from_the_database() {
     // cannot prove (it does not force the query to hit the file).
     let (_, v) = health_json(&app()).await;
     assert_eq!(
-        v["sqlite"], Value::String(sqlite_version()),
+        v["sqlite"],
+        Value::String(sqlite_version()),
         "health must run a real query and report its result, not a compile-time literal: {v}"
     );
 }
@@ -166,7 +171,8 @@ async fn cors_default_stays_wide_open() {
     .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
-        h.get("access-control-allow-origin").map(|v| v.to_str().unwrap()),
+        h.get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
         Some("*"),
         "default CORS must remain `*`: {h:?}"
     );
@@ -174,7 +180,8 @@ async fn cors_default_stays_wide_open() {
     let (s, h, _) = call(&app, "OPTIONS", "/api/collections/posts/records", &[], None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
     assert_eq!(
-        h.get("access-control-allow-origin").map(|v| v.to_str().unwrap()),
+        h.get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
         Some("*"),
         "default preflight must remain `*`: {h:?}"
     );
@@ -247,7 +254,10 @@ fn cors_allowlist_from_env() {
         "/api/collections/posts/records",
         &[("Origin", "https://evil.example.com")],
     );
-    assert_eq!(st, 204, "preflight is still 204 for a rejected origin: {h:?}");
+    assert_eq!(
+        st, 204,
+        "preflight is still 204 for a rejected origin: {h:?}"
+    );
     assert_eq!(
         h.get("access-control-allow-origin"),
         None,
@@ -348,7 +358,8 @@ fn sigterm_lets_an_inflight_request_finish() {
     let (head, tail) = body.split_at(12);
 
     let mut sock = connect(port);
-    sock.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     write!(
         sock,
         "POST /api/collections HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: {ADMIN}\r\n\
@@ -528,8 +539,10 @@ fn http(
     hdrs: &[(&str, &str)],
 ) -> (u16, HashMap<String, String>, String) {
     let mut sock = connect(port);
-    sock.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
-    let mut req = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
+    sock.set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    let mut req =
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n");
     for (k, v) in hdrs {
         req.push_str(&format!("{k}: {v}\r\n"));
     }
@@ -540,9 +553,9 @@ fn http(
     let mut buf = Vec::new();
     let _ = sock.read_to_end(&mut buf); // bounded by the read timeout
     let raw = String::from_utf8_lossy(&buf).into_owned();
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or_else(|| {
-        panic!("{method} {path}: no complete response head, got {raw:?}")
-    });
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("{method} {path}: no complete response head, got {raw:?}"));
     let mut lines = head.split("\r\n");
     let status: u16 = lines
         .next()

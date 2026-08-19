@@ -141,7 +141,11 @@ async fn token_for(app: &Router, id: &str, ty: &str) -> String {
         .iter()
         .filter(|t| t["record"] == json!(id) && t["type"] == json!(ty))
         .collect();
-    assert_eq!(hit.len(), 1, "want exactly one {ty} token for {id}: {all:?}");
+    assert_eq!(
+        hit.len(),
+        1,
+        "want exactly one {ty} token for {id}: {all:?}"
+    );
     hit[0]["token"]
         .as_str()
         .unwrap_or_else(|| panic!("token row must carry a token string: {}", hit[0]))
@@ -245,7 +249,11 @@ async fn tokens_endpoint_is_admin_only() {
 
     for auth in [None, Some(bearer.as_str()), Some("Admin wrongtoken")] {
         let (s, v) = call(&app, "GET", "/api/tokens", auth, None).await;
-        assert_eq!(s, StatusCode::UNAUTHORIZED, "GET /api/tokens as {auth:?}: {v}");
+        assert_eq!(
+            s,
+            StatusCode::UNAUTHORIZED,
+            "GET /api/tokens as {auth:?}: {v}"
+        );
         assert!(
             !v.to_string().contains("password_reset"),
             "no token material in the refusal: {v}"
@@ -278,12 +286,31 @@ async fn reset_token_is_single_use() {
     request_reset(&app, "users", "a@ex.com").await;
     let t = token_for(&app, &id, "password_reset").await;
 
-    assert_eq!(confirm_reset(&app, "users", &t, NEWPW).await.0, StatusCode::OK);
+    assert_eq!(
+        confirm_reset(&app, "users", &t, NEWPW).await.0,
+        StatusCode::OK
+    );
 
     let (s, v) = confirm_reset(&app, "users", &t, "replayedpassword1").await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "replay must fail: {v}");
-    assert_login(&app, "users", "a@ex.com", "replayedpassword1", false, "replay changed nothing").await;
-    assert_login(&app, "users", "a@ex.com", NEWPW, true, "first reset still stands").await;
+    assert_login(
+        &app,
+        "users",
+        "a@ex.com",
+        "replayedpassword1",
+        false,
+        "replay changed nothing",
+    )
+    .await;
+    assert_login(
+        &app,
+        "users",
+        "a@ex.com",
+        NEWPW,
+        true,
+        "first reset still stands",
+    )
+    .await;
 
     // A spent token is gone from the admin listing too.
     assert!(
@@ -322,8 +349,24 @@ async fn reset_token_expires_after_one_hour() {
 
     let (s, v) = confirm_reset(&app, "users", &t, NEWPW).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "expired token must fail: {v}");
-    assert_login(&app, "users", "a@ex.com", NEWPW, false, "expired token changed nothing").await;
-    assert_login(&app, "users", "a@ex.com", PW, true, "original password survives").await;
+    assert_login(
+        &app,
+        "users",
+        "a@ex.com",
+        NEWPW,
+        false,
+        "expired token changed nothing",
+    )
+    .await;
+    assert_login(
+        &app,
+        "users",
+        "a@ex.com",
+        PW,
+        true,
+        "original password survives",
+    )
+    .await;
 
     drop(side);
     let _ = std::fs::remove_file(&path);
@@ -358,9 +401,28 @@ async fn reset_token_cannot_touch_another_user() {
     assert_login(&app, "staff", "b@ex.com", PW, true, "staff password intact").await;
 
     // Spending it on the right collection only ever moves user A.
-    assert_eq!(confirm_reset(&app, "users", &t, NEWPW).await.0, StatusCode::OK);
-    assert_login(&app, "users", "b@ex.com", NEWPW, false, "sibling user untouched").await;
-    assert_login(&app, "users", "b@ex.com", PW, true, "sibling password intact").await;
+    assert_eq!(
+        confirm_reset(&app, "users", &t, NEWPW).await.0,
+        StatusCode::OK
+    );
+    assert_login(
+        &app,
+        "users",
+        "b@ex.com",
+        NEWPW,
+        false,
+        "sibling user untouched",
+    )
+    .await;
+    assert_login(
+        &app,
+        "users",
+        "b@ex.com",
+        PW,
+        true,
+        "sibling password intact",
+    )
+    .await;
 }
 
 // 7. Forged, empty, missing and borrowed-JWT tokens all fail closed.
@@ -372,9 +434,19 @@ async fn forged_reset_tokens_fail_closed() {
     let jwt = bearer.strip_prefix("Bearer ").unwrap().to_string();
     let long = "f".repeat(64);
 
-    for bad in ["", "garbage", "../../etc/passwd", long.as_str(), jwt.as_str()] {
+    for bad in [
+        "",
+        "garbage",
+        "../../etc/passwd",
+        long.as_str(),
+        jwt.as_str(),
+    ] {
         let (s, v) = confirm_reset(&app, "users", bad, NEWPW).await;
-        assert_eq!(s, StatusCode::BAD_REQUEST, "token {bad:?} must be refused: {v}");
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "token {bad:?} must be refused: {v}"
+        );
     }
     // No token field at all.
     let (s, v) = call(
@@ -388,7 +460,15 @@ async fn forged_reset_tokens_fail_closed() {
     assert_eq!(s, StatusCode::BAD_REQUEST, "missing token: {v}");
 
     assert_login(&app, "users", "a@ex.com", NEWPW, false, "nothing was reset").await;
-    assert_login(&app, "users", "a@ex.com", PW, true, "original password intact").await;
+    assert_login(
+        &app,
+        "users",
+        "a@ex.com",
+        PW,
+        true,
+        "original password intact",
+    )
+    .await;
 }
 
 // 8. A reset kills sessions issued before it. Whoever knew the old password —
@@ -413,7 +493,10 @@ async fn reset_invalidates_outstanding_sessions() {
 
     request_reset(&app, "users", "a@ex.com").await;
     let t = token_for(&app, &id, "password_reset").await;
-    assert_eq!(confirm_reset(&app, "users", &t, NEWPW).await.0, StatusCode::OK);
+    assert_eq!(
+        confirm_reset(&app, "users", &t, NEWPW).await.0,
+        StatusCode::OK
+    );
 
     let (s, v) = call(
         &app,
@@ -423,7 +506,11 @@ async fn reset_invalidates_outstanding_sessions() {
         None,
     )
     .await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "pre-reset session must be dead: {v}");
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "pre-reset session must be dead: {v}"
+    );
 }
 
 // 9. The reset path is not a way around the password policy, and a rejected
@@ -436,8 +523,20 @@ async fn reset_enforces_password_policy_without_burning_the_token() {
     let t = token_for(&app, &id, "password_reset").await;
 
     let (s, v) = confirm_reset(&app, "users", &t, SHORTPW).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "short password must be refused: {v}");
-    assert_login(&app, "users", "a@ex.com", SHORTPW, false, "short password not set").await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "short password must be refused: {v}"
+    );
+    assert_login(
+        &app,
+        "users",
+        "a@ex.com",
+        SHORTPW,
+        false,
+        "short password not set",
+    )
+    .await;
 
     // The token survives the rejection and still works.
     let (s, v) = confirm_reset(&app, "users", &t, NEWPW).await;
@@ -461,7 +560,11 @@ async fn signup_starts_unverified() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "signup: {created}");
-    assert_eq!(created["verified"], json!(false), "create response: {created}");
+    assert_eq!(
+        created["verified"],
+        json!(false),
+        "create response: {created}"
+    );
 
     let id = created["id"].as_str().unwrap();
     assert_eq!(record(&app, "users", id).await["verified"], json!(false));
@@ -490,7 +593,10 @@ async fn verification_token_marks_record_verified() {
     assert_eq!(s1, StatusCode::OK, "known address: {hit}");
     assert_eq!(s2, StatusCode::OK, "unknown address: {miss}");
     assert_eq!(hit, miss, "known and unknown must be byte-identical");
-    assert!(!hit.to_string().contains("token"), "no token in body: {hit}");
+    assert!(
+        !hit.to_string().contains("token"),
+        "no token in body: {hit}"
+    );
 
     let t = token_for(&app, &id, "verification").await;
     let (s, v) = confirm_verification(&app, "users", &t).await;
@@ -519,7 +625,10 @@ async fn verification_token_is_single_use_and_bound_to_one_user() {
 
     request_verification(&app, "users", "a@ex.com").await;
     let t = token_for(&app, &a, "verification").await;
-    assert_eq!(confirm_verification(&app, "users", &t).await.0, StatusCode::OK);
+    assert_eq!(
+        confirm_verification(&app, "users", &t).await.0,
+        StatusCode::OK
+    );
 
     let (s, v) = confirm_verification(&app, "users", &t).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "replay must fail: {v}");
@@ -581,7 +690,11 @@ async fn verified_is_a_reserved_field_name() {
         Some(json!({"name": "shadow", "schema": [{"name": "verified", "type": "bool"}]})),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "'verified' must be reserved: {v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "'verified' must be reserved: {v}"
+    );
 }
 
 // 15. Verification tokens age out on the same 1-hour clock as reset tokens.
