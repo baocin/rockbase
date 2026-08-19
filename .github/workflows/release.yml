@@ -82,6 +82,11 @@ jobs:
   publish:
     name: publish release
     needs: build
+    # `needs` alone SKIPS this job if any matrix leg fails, which would contradict
+    # fail-fast: false above — one unavailable runner class (macos-13 is being
+    # retired) would withhold every binary that did build. Run regardless and
+    # publish whatever artifacts exist; only bail if literally nothing built.
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -95,6 +100,9 @@ jobs:
         run: |
           set -euo pipefail
           ls -la dist
+          if [ -z "$(ls -A dist 2>/dev/null)" ]; then
+            echo "no artifacts built for any target"; exit 1
+          fi
           gh release create "$TAG" dist/* \
             --repo "${{ github.repository }}" \
             --title "rockbase $TAG" \
