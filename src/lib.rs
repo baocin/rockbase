@@ -12,8 +12,10 @@ pub mod realtime;
 pub mod records;
 pub mod rules;
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::{
     http::StatusCode,
@@ -35,6 +37,14 @@ pub struct App {
     /// cache per-collection rules and drop the cache when this changes, so an admin
     /// editing a rule still applies to already-open subscriptions.
     pub cols_version: AtomicU64,
+    /// Consecutive failed logins per (collection, identity), with the time of the last
+    /// one. `auth::auth_with_password` refuses an identity that crossed the limit until
+    /// its cooldown expires; a good login clears the entry.
+    ///
+    /// ponytail: in-process map, no dependency and no eviction thread — stale entries
+    /// are dropped when the identity is seen again. Move it into SQLite (or Redis) if
+    /// rockbase ever runs as more than one process.
+    pub login_fails: Mutex<HashMap<(String, String), (u32, Instant)>>,
 }
 
 pub type S = Arc<App>;
@@ -119,6 +129,7 @@ pub fn build_app(db: &str, admin_token: String) -> Router {
         jwt_secret,
         admin_token,
         cols_version: AtomicU64::new(0),
+        login_fails: Mutex::default(),
     });
     Router::new()
         .route("/api/health", get(health))

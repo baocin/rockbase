@@ -1,4 +1,5 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::{Path, State},
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::db::get_collection;
-use crate::records::{fetch_record, record_json};
+use crate::records::{fetch_record, record_json, token_epoch};
 use crate::{err, App, Reply, S};
 
 #[derive(Serialize, Deserialize)]
@@ -19,7 +20,18 @@ pub struct Claims {
     pub sub: String,
     pub col: String,
     pub exp: u64,
+    /// Revocation epoch the token was minted against; `from_jwt` refuses it once the
+    /// record has moved past it. Defaulted so tokens issued before revocation existed
+    /// decode as 0 — the same value a record without a stored epoch reads as — instead
+    /// of failing to deserialize and 500ing.
+    #[serde(default)]
+    pub epoch: i64,
 }
+
+/// Consecutive failed logins allowed per identity before the cooldown starts.
+const MAX_FAILS: u32 = 5;
+/// How long a locked-out identity stays locked out, counted from its last failure.
+const COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
 pub enum Who {
     Admin,
@@ -29,7 +41,8 @@ pub enum Who {
 
 /// Decode a bare JWT into a user identity. `None` for anything invalid — bad
 /// signature, expired, malformed — and also for a token whose user has since been
-/// deleted, which behaves exactly like no token at all.
+/// deleted or whose epoch the record has moved past. All of them behave exactly like
+/// no token at all: Guest, never a half-authenticated user and never a 500.
 ///
 /// ponytail: this checks a pooled connection out itself — never call it while
 /// already holding one. Every call site resolves identity before the handler
@@ -44,14 +57,15 @@ fn from_jwt(app: &App, t: &str) -> Option<Who> {
     .ok()?;
     let c = t.claims;
     let db = app.db.get();
-    let exists: bool = db
+    // Fail closed twice over: no row and an unreadable row both resolve to no identity.
+    let data: String = db
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM records WHERE collection = ?1 AND id = ?2)",
+            "SELECT data FROM records WHERE collection = ?1 AND id = ?2",
             params![c.col, c.sub],
             |r| r.get(0),
         )
-        .unwrap_or(false);
-    exists.then_some(Who::User {
+        .ok()?; // deleted since the token was issued
+    (token_epoch(&data) == Some(c.epoch)).then_some(Who::User {
         col: c.col,
         id: c.sub,
     })
@@ -65,10 +79,28 @@ fn from_jwt(app: &App, t: &str) -> Option<Who> {
 /// logs, browser history, and `Referer` headers, so it must not become a general
 /// purpose auth mechanism — `tests/sse_token.rs` asserts the REST API still refuses it.
 pub fn who_from_query_token(app: &App, t: &str) -> Who {
-    if t == app.admin_token {
+    if ct_eq(t, &app.admin_token) {
         return Who::Admin;
     }
     from_jwt(app, t).unwrap_or(Who::Guest)
+}
+
+/// Constant-time comparison for the admin token.
+///
+/// `==` on `str` short-circuits at the first differing byte, so response time leaks
+/// how long a correct prefix was — a remote attacker can recover the token byte by
+/// byte given enough samples. This token is a bearer credential to the entire
+/// database, so the few lines are worth it.
+///
+/// ponytail: the length check still leaks the length. That is a poor oracle against a
+/// random token, and hiding it would mean hashing both sides; revisit if tokens ever
+/// become user-chosen.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 pub fn who(app: &App, headers: &HeaderMap) -> Who {
@@ -76,7 +108,7 @@ pub fn who(app: &App, headers: &HeaderMap) -> Who {
         return Who::Guest;
     };
     if let Some(t) = h.strip_prefix("Admin ") {
-        if t == app.admin_token {
+        if ct_eq(t, &app.admin_token) {
             return Who::Admin;
         }
     }
@@ -95,7 +127,12 @@ pub fn require_admin(app: &App, headers: &HeaderMap) -> Result<(), (StatusCode, 
     }
 }
 
-fn make_token(app: &App, col: &str, id: &str) -> Result<String, (StatusCode, Json<Value>)> {
+fn make_token(
+    app: &App,
+    col: &str,
+    id: &str,
+    epoch: i64,
+) -> Result<String, (StatusCode, Json<Value>)> {
     let exp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -105,6 +142,7 @@ fn make_token(app: &App, col: &str, id: &str) -> Result<String, (StatusCode, Jso
         sub: id.into(),
         col: col.into(),
         exp,
+        epoch,
     };
     encode(
         &Header::default(),
@@ -132,15 +170,30 @@ pub async fn auth_refresh(
     }
     // ponytail: no auth-collection type check — a User token only ever names an
     // auth collection, and who() already proved the record exists there.
-    let token = make_token(&app, &col, &id)?;
+    // The record is read first because the fresh token has to carry the CURRENT epoch;
+    // still one checkout, and make_token never touches the pool.
     let db = app.db.get();
     let Some((data, created, updated)) = fetch_record(&db, &name, &id) else {
         return Err(err(StatusCode::NOT_FOUND, "record not found")); // race: deleted since who()
     };
+    let Some(epoch) = token_epoch(&data) else {
+        return Err(err(StatusCode::UNAUTHORIZED, "auth token required"));
+    };
+    let token = make_token(&app, &col, &id, epoch)?;
     Ok(Json(json!({
         "token": token,
         "record": record_json(&name, &id, &data, &created, &updated),
     })))
+}
+
+/// Failed-login bookkeeping, keyed by (collection, identity). Never global: one
+/// account is locked by six fumbled logins, and a global counter would let that lock
+/// out everyone else too — the cheapest denial of service in the codebase.
+///
+/// Only ever taken for a few statements and never while acquiring a pooled connection,
+/// so it cannot participate in a deadlock with the pool.
+fn login_fails(app: &App) -> std::sync::MutexGuard<'_, HashMap<(String, String), (u32, Instant)>> {
+    app.login_fails.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub async fn auth_with_password(
@@ -148,6 +201,33 @@ pub async fn auth_with_password(
     Path(name): Path<String>,
     Json(body): Json<Value>,
 ) -> Reply {
+    let identity = body.get("identity").and_then(|v| v.as_str()).unwrap_or("");
+    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    let key = (name.clone(), identity.to_string());
+    // Before the checkout, so a throttled caller never even takes a connection.
+    {
+        let mut fails = login_fails(&app);
+        if let Some(&(n, at)) = fails.get(&key) {
+            if n >= MAX_FAILS {
+                if at.elapsed() < COOLDOWN {
+                    // A correct password does not help either — otherwise the throttle
+                    // is a hint about how close the last guess was.
+                    return Err(err(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "too many failed login attempts, try again later",
+                    ));
+                }
+                fails.remove(&key); // cooldown served
+            }
+        }
+    }
+    let reject = || {
+        let mut fails = login_fails(&app);
+        let slot = fails.entry(key.clone()).or_insert((0, Instant::now()));
+        slot.0 += 1;
+        slot.1 = Instant::now();
+        err(StatusCode::BAD_REQUEST, "invalid credentials")
+    };
     let db = app.db.get();
     // ponytail: auth-with-password is deliberately not rule-gated — the login
     // endpoint has to work before the caller has any identity to test.
@@ -157,8 +237,6 @@ pub async fn auth_with_password(
     if col.ty != "auth" {
         return Err(err(StatusCode::BAD_REQUEST, "not an auth collection"));
     }
-    let identity = body.get("identity").and_then(|v| v.as_str()).unwrap_or("");
-    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
     let row = db
         .query_row(
             "SELECT id, data, created, updated FROM records \
@@ -175,7 +253,7 @@ pub async fn auth_with_password(
         )
         .ok();
     let Some((id, data, created, updated)) = row else {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid credentials"));
+        return Err(reject());
     };
     let parsed: Map<String, Value> = serde_json::from_str(&data).unwrap_or_default();
     let hash = parsed
@@ -183,9 +261,13 @@ pub async fn auth_with_password(
         .and_then(|h| h.as_str())
         .unwrap_or("");
     if !bcrypt::verify(password, hash).unwrap_or(false) {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid credentials"));
+        return Err(reject());
     }
-    let token = make_token(&app, &name, &id)?;
+    let Some(epoch) = token_epoch(&data) else {
+        return Err(reject()); // unreadable row: fail closed
+    };
+    login_fails(&app).remove(&key);
+    let token = make_token(&app, &name, &id, epoch)?;
     Ok(Json(json!({
         "token": token,
         "record": record_json(&name, &id, &data, &created, &updated),

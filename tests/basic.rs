@@ -703,13 +703,16 @@ async fn auth_refresh_identity_and_existence() {
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     assert_eq!(v["message"], "token is for another collection");
 
-    // 7. password change via PATCH: old login dies, new works
+    // 7. password change via PATCH: old login dies, new works.
+    // oldPassword is required since auth hardening: without it a stolen bearer
+    // could rewrite the password and lock the owner out permanently.
+    // tests/authsec.rs owns that rule; this asserts the happy path still works.
     let (s, _) = call(
         &app,
         "PATCH",
         &format!("/api/collections/users/records/{uid}"),
         Some(&bearer),
-        Some(json!({"password": "newpass99"})),
+        Some(json!({"password": "newpass99", "oldPassword": "clubrock1"})),
     )
     .await;
     assert_eq!(s, StatusCode::OK);

@@ -19,18 +19,40 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..15].to_string()
 }
 
-/// Names record_json injects from system columns; a schema field may not use them.
-pub const RESERVED_FIELDS: [&str; 5] = [
+/// Revocation counter on an auth record. Every token carries the value it was minted
+/// against and `auth::from_jwt` refuses the ones that no longer match, so bumping it
+/// logs out every outstanding session for that record. It lives inside the record's
+/// data JSON but is reserved and stripped exactly like `password_hash`: no client can
+/// read it back or set it through the record API.
+pub const EPOCH_FIELD: &str = "token_epoch";
+
+/// Names record_json injects or strips; a schema field may not use them.
+pub const RESERVED_FIELDS: [&str; 6] = [
     "id",
     "created",
     "updated",
     "collectionName",
     "password_hash",
+    EPOCH_FIELD,
 ];
+
+/// The epoch stored on an auth record, or `None` when the row is unreadable — every
+/// caller treats `None` as "deny". Absent reads as 0, which is also what a token minted
+/// before revocation existed decodes to, so nothing outstanding breaks on upgrade.
+pub fn token_epoch(data: &str) -> Option<i64> {
+    match serde_json::from_str::<Map<String, Value>>(data)
+        .ok()?
+        .get(EPOCH_FIELD)
+    {
+        None => Some(0),
+        Some(v) => v.as_i64(),
+    }
+}
 
 pub fn record_json(collection: &str, id: &str, data: &str, created: &str, updated: &str) -> Value {
     let mut obj: Map<String, Value> = serde_json::from_str(data).unwrap_or_default();
     obj.remove("password_hash");
+    obj.remove(EPOCH_FIELD);
     obj.insert("id".into(), json!(id));
     obj.insert("collectionName".into(), json!(collection));
     obj.insert("created".into(), json!(created));
@@ -50,7 +72,15 @@ pub fn validate(
             .find(|f| f.get("name").and_then(|n| n.as_str()) == Some(k))
     };
     for (k, v) in data {
-        let known = field_def(k).is_some() || (is_auth && (k == "email" || k == "password"));
+        // write-only pseudo-fields: `password` and `oldPassword` are credentials and
+        // `revokeTokens` is a command — all three are consumed by the write and never
+        // stored, so none of them is a schema field.
+        let known = field_def(k).is_some()
+            || (is_auth
+                && matches!(
+                    k.as_str(),
+                    "email" | "password" | "oldPassword" | "revokeTokens"
+                ));
         if !known {
             return Err(format!("unknown field '{k}'"));
         }
@@ -436,6 +466,25 @@ fn hash_password(data: &mut Map<String, Value>) -> Result<(), (StatusCode, Json<
     Ok(())
 }
 
+/// Proof that the caller knows the password they are replacing. Fails closed: a
+/// missing, empty, malformed or non-matching `oldPassword` — and a record with no
+/// usable hash — all refuse the change.
+fn check_old_password(
+    data: &str,
+    supplied: Option<&Value>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let stored: Map<String, Value> = serde_json::from_str(data).unwrap_or_default();
+    let hash = stored
+        .get("password_hash")
+        .and_then(|h| h.as_str())
+        .unwrap_or("");
+    let old = supplied.and_then(|v| v.as_str()).unwrap_or("");
+    if !old.is_empty() && bcrypt::verify(old, hash).unwrap_or(false) {
+        return Ok(());
+    }
+    Err(err(StatusCode::BAD_REQUEST, "oldPassword does not match"))
+}
+
 /// What one record write produced: the HTTP response body, plus the realtime event
 /// to publish. Cores never lock and never broadcast — the caller does both, which is
 /// what lets a batch buffer the events and publish them only after its tx commits.
@@ -473,17 +522,26 @@ pub fn create_core(db: &Connection, w: &Who, name: &str, body: &Value) -> Effect
     validate(&schema, &data, is_auth, false).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
     check_relations(db, &schema, &data).map_err(|m| err(StatusCode::BAD_REQUEST, m))?;
     if is_auth {
-        let email = data.get("email").and_then(|e| e.as_str()).unwrap_or("");
+        // owned: hash_password takes `data` mutably before the uniqueness check
+        let email = data
+            .get("email")
+            .and_then(|e| e.as_str())
+            .unwrap_or("")
+            .to_string();
         if !email.contains('@') {
             return Err(err(StatusCode::BAD_REQUEST, "valid email required"));
         }
         if !data.contains_key("password") {
             return Err(err(StatusCode::BAD_REQUEST, "password required"));
         }
-        if email_taken(db, name, email, "") {
+        // Password policy BEFORE the uniqueness check: the other order answers
+        // "email already in use" for a registered address and "password must be at
+        // least 8 chars" for a fresh one, which turns the signup form into an
+        // account-enumeration oracle for anyone who submits a short password.
+        hash_password(&mut data)?;
+        if email_taken(db, name, &email, "") {
             return Err(err(StatusCode::BAD_REQUEST, "email already in use"));
         }
-        hash_password(&mut data)?;
     }
     let id = new_id();
     let ts = now(db);
@@ -521,15 +579,35 @@ pub fn update_core(db: &Connection, w: &Who, name: &str, id: &str, body: &Value)
                 return Err(err(StatusCode::BAD_REQUEST, "email already in use"));
             }
         }
+        // A stolen token must not be able to lock the owner out of their own account,
+        // so a password change proves knowledge of the current one. Admins are exempt:
+        // a support reset is precisely the case where nobody has the old password.
+        if patch.contains_key("password") && !matches!(w, Who::Admin) {
+            check_old_password(&data, patch.get("oldPassword"))?;
+        }
     }
+    // Both are write-only: consumed here, stripped from the merge below, never echoed.
+    let revoke = patch
+        .get("revokeTokens")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let rotated = patch.contains_key("password");
     let mut merged: Map<String, Value> = serde_json::from_str(&data).unwrap_or_default();
     for (k, v) in patch {
         merged.insert(k, v); // ponytail: shallow merge, deep merge when nested patches show up
     }
-    // ponytail: password change via plain PATCH, old-password confirmation skipped;
-    // add an oldPassword check (bcrypt::verify against stored hash) when untrusted
-    // clients can hold long-lived tokens.
+    merged.remove("oldPassword");
+    merged.remove("revokeTokens");
     hash_password(&mut merged)?;
+    // A password change is also a logout-everywhere. Rotating the password because
+    // somebody else holds a session is pointless if their session survives it.
+    if revoke || rotated {
+        let epoch = merged
+            .get(EPOCH_FIELD)
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        merged.insert(EPOCH_FIELD.into(), json!(epoch + 1));
+    }
     let ts = now(db);
     db.execute(
         "UPDATE records SET data = ?1, updated = ?2 WHERE collection = ?3 AND id = ?4",
