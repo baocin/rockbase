@@ -6,8 +6,8 @@ API rules, file uploads, SSE realtime, transactional batch writes, and a one-fil
 admin UI.
 
 It is not PocketBase. It reproduces the parts of PocketBase's HTTP shape that this
-codebase implements, and nothing else. The source is ~2,300 lines across twelve
-modules in `src/`; the behavior below is what those modules and the 124 tests do.
+codebase implements, and nothing else. The source is ~2,500 lines across twelve
+modules in `src/`; the behavior below is what those modules and the 135 tests do.
 
 > The documents in `specs/` are historical. They describe an earlier single-file
 > design, predate per-collection rules, and in three places recommend behavior that
@@ -246,6 +246,9 @@ real columns, everything else goes through `json_extract`. Filters are capped at
 bytes and 32 levels of nesting. Trailing input is an error, so `title='x' OR '1'='1'`
 is rejected rather than interpreted.
 
+The per-collection API rules parse with the same code, in `Mode::Rule` — see
+[Security model](#the-five-rules) for the one place the two dialects differ.
+
 Known sharp edge: `%` and `_` inside a `~` value act as LIKE wildcards; there is no
 `ESCAPE` clause.
 
@@ -403,21 +406,57 @@ Every collection carries five rules: `listRule`, `viewRule`, `createRule`, `upda
 
 An `Admin` token bypasses all five, unconditionally, everywhere.
 
-**Rule expressions are a single comparison** — `lhs op rhs`, split at the first operator
-found among `!=`, `>=`, `<=`, `=`, `>`, `<`. There is no `&&`, no `||`, no parentheses,
-no `~`. Each operand is one of:
+**Rule expressions are full boolean expressions**, in the same grammar `filter=` uses.
+`src/filter.rs` is one parser with two backends — `to_sql` for the paths that have a row
+to query (list, view, update, delete, file download) and `eval` for the paths that do not
+(create, realtime SSE) — so the two can never disagree about precedence, short-circuiting
+or coercion.
 
-- `@request.auth.id` — the caller's record id, or `""` for a guest. It is **always** a
-  SQL bind, never spliced into the query text, so it is safe in either slot.
-- a quoted literal — `'public'` or `"public"`, with no inner quote of the same kind.
+```
+owner = @request.auth.id && status = 'published'
+owner = @request.auth.id || (status = 'published' && featured = true)
+title ~ 'draft'                 # LIKE '%draft%'
+archived = null                 # IS NULL
+```
+
+`&&` binds tighter than `||`; parentheses override that. Operators are `=`, `!=`, `>`,
+`>=`, `<`, `<=`, `~`, `!~`. Operands are:
+
+- `@request.auth.id` — the caller's record id, or `""` for a guest. It is a node in the
+  parse tree, **always** a SQL bind, never spliced into the query text, and valid in
+  either operand slot.
+- a single-quoted literal — `'published'`, with `''` for an inner quote. Double quotes are
+  not string syntax.
 - `true`, `false`, an integer, or a float.
+- `null`, accepted only with `=` / `!=`, compiling to `IS NULL` / `IS NOT NULL`.
 - a field name — `id`, `created` and `updated` reference the real columns; anything else
   becomes `json_extract(data, '$.name')`. Field names are identifier-checked
   (`[A-Za-z0-9_]`, ≤64 chars) *before* they reach the SQL string.
 
-Anything that does not parse into that shape **fails closed**: the write is rejected at
-collection-definition time, and a stored rule that somehow no longer compiles denies the
-request rather than being skipped.
+Three constraints worth knowing before you write one:
+
+- The **left-hand side must be a field name or `@request.auth.id`**. A literal on the left
+  is rejected, so `1=1` does not parse and cannot be appended to a rule.
+- The right of `~` / `!~` must be a literal or the auth token, never a second field.
+- Rules get the same caps as `filter=`: **2048 bytes** and **32 levels of nesting**.
+  Anything longer or deeper is rejected when the rule is saved.
+
+One dialect difference from `filter=`: an unquoted, non-numeric bareword is a *field name*
+in a rule and a *string literal* in a filter. In a rule, `status = published` compares two
+columns — quote the literal.
+
+Anything that does not parse **fails closed**: the write is rejected at
+collection-definition time with a `400` and the stored rule left untouched, and a
+stored rule that somehow no longer compiles denies the request rather than being skipped.
+
+**A top-level `||` is parenthesised on the way into SQL, and that is load-bearing.**
+`gate_record` splices the rule fragment into a larger clause — `WHERE collection = ? AND
+id = ? AND <rule>`. Without the wrap, `a || b` reassociates to `(collection AND id AND a)
+OR b`, so a disjunct matching *any other row* would grant access to the row being gated.
+Harmless while rules were single comparisons, a private-record read the moment `||` became
+expressible. `Node::to_sql` wraps at the source rather than at each call site; pinned by
+`composite_rules_gate_view_update_delete` in `tests/rules_compose.rs` and by a unit test in
+`src/filter.rs`.
 
 ### Where rules are enforced
 
@@ -544,16 +583,6 @@ same create inside a batch is refused. Batch is strictly more restrictive than t
 it wraps. Inner failures also lose their real status: a sub-request that would have been a
 404 or a 403 surfaces as `{"code":400,"message":...,"index":N}`.
 
-**The two rule evaluators do not agree on type coercion.** `create` has no row to query,
-so its rule is evaluated in memory (`eval_rule_mem`) with strict JSON equality; list, view,
-update, delete and file download compile to SQL (`compile_rule`) and inherit SQLite's
-numeric comparison. A rule comparing `1` against a stored `1.0` is true in SQL and false
-in memory. In every divergence we can identify the in-memory evaluator is the stricter
-one — anything it cannot resolve is `false` — so the disagreement denies rather than
-grants, but that is an observation, not a guarantee pinned by a test. Relatedly, `id`,
-`created` and `updated` are all `null` during create evaluation because the row does not
-exist yet, so a `createRule` of `id = @request.auth.id` can never pass.
-
 **`?expand=` is N+1.** Roughly `4 + 2N` queries for a page of N rows with one expand field:
 count, page, parent collection, one target-collection read per requested field, then a gate
 query and a fetch query per (row, field). It is fine for a 30-row page and pathological for
@@ -568,10 +597,9 @@ is the cost.
 `Ctrl-C` drops in-flight requests. WAL mode plus a 5-second busy timeout means the database
 survives it, but a response in progress does not.
 
-**Rules are single comparisons only.** No `&&`, no `||`, no parentheses, no `~`, no
-`@request.data.*`, no relation traversal like `author.owner`. A policy that needs two
-conditions cannot currently be expressed. (The *filter* parser is a full expression parser
-— the two do not share a grammar.)
+**Rules cannot reach outside the record.** They compose freely with `&&`, `||` and
+parentheses, but there is no `@request.data.*`, no relation traversal like `author.owner`,
+and no functions. A rule sees the record's own fields and the caller's id, nothing else.
 
 Smaller ones, from the source:
 
@@ -583,6 +611,8 @@ Smaller ones, from the source:
 - Removing a schema field leaves stale values in stored records; there is no cleanup sweep.
 - CORS is `*` with no credentials and no per-origin configuration.
 - `~` filter values are not LIKE-escaped, so `%` and `_` in a search term act as wildcards.
+- `id`, `created` and `updated` are `null` while a `createRule` is evaluated — the row does
+  not exist yet — so a `createRule` of `id = @request.auth.id` can never pass.
 
 ---
 
@@ -592,7 +622,7 @@ Smaller ones, from the source:
 cargo test
 ```
 
-124 tests, all passing: 11 unit tests inside `src/` and 113 integration tests in `tests/`.
+135 tests, all passing: 12 unit tests inside `src/` and 123 integration tests in `tests/`.
 The integration tests drive the real `Router` through `tower::ServiceExt::oneshot` against
 an in-memory SQLite database, so they exercise the actual middleware stack, not a mock.
 
@@ -604,11 +634,12 @@ an in-memory SQLite database, so they exercise the actual middleware stack, not 
 | `tests/colupdate.rs` | 11 | collection `GET`/`PATCH`, partial rule updates, schema replacement and its effect on existing records |
 | `tests/realtime.rs` | 11 | SSE frame shape, topic filtering, per-subscriber rule gating including delete events |
 | `tests/rules.rs` | 10 | rule defaults per type, NULL/`""`/expression semantics, the 401/403 ladder, admin bypass, rule validation |
+| `tests/rules_compose.rs` | 10 | `&&`/`\|\|`/parenthesised rules across list, view, create, update and delete; precedence; the auth token bound inside a composite; injection payloads; malformed composites rejected on write; single-comparison regression; numeric coercion agreeing on both paths |
 | `tests/sse_token.rs` | 9 | SSE `?token=`: parity with the header, admin and user tokens, header precedence (including a malformed header), invalid token = guest, rule gating, the REST API still refusing it, no token in the request log |
 | `tests/adminui.rs` | 7 | the three admin routes, no wildcard, no secret in the HTML, the asset's own contract |
 | `tests/cli.rs` | 7 | env config, invalid `RB_PORT` aborting startup, CORS preflight, request-log format |
 | `tests/basic.rs` | 5 | end-to-end CRUD, auth, query parameters, backups, WAL persistence |
-| `src/` unit tests | 11 | filter compiler (8), filename sanitizer, reserved-name rejection, `busy_timeout` |
+| `src/` unit tests | 12 | filter compiler (9, including the top-level-`Or` parenthesisation invariant), filename sanitizer, reserved-name rejection, `busy_timeout` |
 
 `tests/cli.rs` — and `request_log_redacts_the_query_token` in `tests/sse_token.rs` — spawn
 the real binary as a subprocess and read its stdout, so they require the binary to build;

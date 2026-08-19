@@ -2,6 +2,8 @@
 > This was a design input, written when the whole crate was a single `src/main.rs`.
 > The crate is now modular (`src/lib.rs` + modules), so every file-layout claim below
 > is wrong. The authoritative specification is `tests/rules.rs` plus the source.
+> Rules are also no longer single comparisons: they are full boolean expressions in the
+> shared `src/filter.rs` grammar, and `tests/rules_compose.rs` covers the current one.
 > Do not implement from this document.
 
 # Spec: Per-collection API rules
