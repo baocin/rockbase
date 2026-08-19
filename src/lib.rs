@@ -12,6 +12,7 @@ pub mod records;
 pub mod realtime;
 pub mod rules;
 
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -29,6 +30,10 @@ pub struct App {
     pub events: broadcast::Sender<Value>,
     pub jwt_secret: String,
     pub admin_token: String,
+    /// Bumped by every _collections create/update/delete. Long-lived readers (SSE)
+    /// cache per-collection rules and drop the cache when this changes, so an admin
+    /// editing a rule still applies to already-open subscriptions.
+    pub cols_version: AtomicU64,
 }
 
 pub type S = Arc<App>;
@@ -109,6 +114,7 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
         events: tx,
         jwt_secret,
         admin_token,
+        cols_version: AtomicU64::new(0),
     });
     Router::new()
         .route("/api/health", get(health))

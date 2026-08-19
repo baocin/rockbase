@@ -11,6 +11,13 @@ use crate::db::{get_collection, Col};
 use crate::rules::{compile_rule, defaults};
 use crate::{err, ident_ok, Reply, S};
 
+/// Invalidate every cached copy of the collection rules (see `App::cols_version`).
+/// Called by each handler that writes `_collections`, before it returns.
+fn bump(app: &S) {
+    app.cols_version
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// The five rules, as (JSON key, SQL column), in LIST/VIEW/CREATE/UPDATE/DELETE order.
 const RULE_KEYS: [(&str, &str); 5] = [
     ("listRule", "list_rule"),
@@ -159,6 +166,7 @@ pub async fn collections_create(
     if n == 0 {
         return Err(err(StatusCode::BAD_REQUEST, "collection already exists"));
     }
+    bump(&app);
     Ok(Json(col_json(
         name,
         &Col { ty: ty.into(), schema: schema.as_array().cloned().unwrap_or_default(), rules },
@@ -227,6 +235,7 @@ pub async fn collections_update(
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
     let c = get_collection(&db, &name).unwrap();
+    bump(&app);
     Ok(Json(col_json(&name, &c)))
 }
 
@@ -245,6 +254,7 @@ pub async fn collections_delete(
     }
     db.execute("DELETE FROM records WHERE collection = ?1", [&name])
         .unwrap();
+    bump(&app);
     drop(db); // never do file IO under the mutex
     crate::files::remove_collection_files(&name);
     Ok(Json(json!({})))

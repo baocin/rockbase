@@ -304,9 +304,12 @@ fn check_relations(
 /// dangling, null, unknown or non-relation target is silently omitted and the
 /// parent record still returns 200; if nothing resolves there is no `expand` key.
 ///
-/// ponytail: N+1 — one fetch + one gate per (row, field). The target collection
-/// row is read once per requested field, not once per row. Batch into
-/// `WHERE id IN (...)` if wide lists ever show up.
+/// Cost is one `_collections` read plus ONE `id IN (...)` query per requested
+/// field, independent of row count. Batching does not weaken the gate: the exact
+/// fragment `gate_record` would have run per row is ANDed into the bulk SELECT, so
+/// a row that per-row EXISTS would have rejected simply never comes back. Same
+/// rule text, same compiler, same binds, and SQLite still evaluates it per row —
+/// which is what keeps `owner = @request.auth.id` row-by-row correct.
 fn expand_records(db: &Connection, w: &Who, schema: &[Value], expand: &str, items: &mut [Value]) {
     for field in expand.split(',').map(str::trim) {
         let Some(def) = schema.iter().find(|f| {
@@ -323,18 +326,60 @@ fn expand_records(db: &Connection, w: &Who, schema: &[Value], expand: &str, item
         let Some(tcol) = get_collection(db, target) else {
             continue;
         };
+        // distinct ids this field points at; null/absent relations contribute none
+        let mut ids: Vec<String> = items
+            .iter()
+            .filter_map(|r| r.get(field).and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            continue;
+        }
+        // The gate, hoisted out of the row loop but NOT out of the row: the rule is
+        // per-caller so it compiles once, then SQLite applies it to each row.
+        let gate = match check_rule(w, &tcol.rules[VIEW]) {
+            Ok(None) => None, // admin bypass or public rule
+            Ok(Some(expr)) => match compile_rule(&expr, auth_id(w)) {
+                Some(g) => Some(g),
+                None => continue, // stored rule no longer compiles: fail closed
+            },
+            Err(_) => continue, // NULL rule = admin only
+        };
+        // one '?' per id, every id bound — never spliced into the SQL text
+        let mut sql = format!(
+            "SELECT id, data, created, updated FROM records \
+             WHERE collection = ? AND id IN ({})",
+            ["?"].repeat(ids.len()).join(",")
+        );
+        let mut binds: Vec<rusqlite::types::Value> = vec![target.to_string().into()];
+        binds.extend(ids.into_iter().map(rusqlite::types::Value::from));
+        if let Some((frag, rbinds)) = gate {
+            sql.push_str(&format!(" AND {frag}"));
+            binds.extend(rbinds);
+        }
+        let Ok(mut stmt) = db.prepare(&sql) else {
+            continue;
+        };
+        // record_json strips password_hash, so auth targets stay scrubbed
+        let rows: std::collections::HashMap<String, Value> =
+            match stmt.query_map(params_from_iter(binds.iter()), |r| {
+                let (id, data, created, updated): (String, String, String, String) =
+                    (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+                Ok((id.clone(), record_json(target, &id, &data, &created, &updated)))
+            }) {
+                Ok(it) => it.filter_map(|r| r.ok()).collect(),
+                Err(_) => continue,
+            };
         for rec in items.iter_mut() {
-            let Some(id) = rec.get(field).and_then(|v| v.as_str()).map(str::to_string) else {
-                continue; // null or absent relation
+            let Some(row) = rec
+                .get(field)
+                .and_then(|v| v.as_str())
+                .and_then(|id| rows.get(id))
+                .cloned()
+            else {
+                continue; // null, dangling, or gated out
             };
-            if gate_record(db, w, &tcol.rules[VIEW], target, &id).is_err() {
-                continue; // caller could not GET it directly, so expand must not hand it over
-            }
-            let Some((data, created, updated)) = fetch_record(db, target, &id) else {
-                continue; // dangling id
-            };
-            // record_json strips password_hash, so auth targets stay scrubbed
-            let row = record_json(target, &id, &data, &created, &updated);
             if let Some(Value::Object(e)) = rec
                 .as_object_mut()
                 .map(|o| o.entry("expand").or_insert_with(|| json!({})))

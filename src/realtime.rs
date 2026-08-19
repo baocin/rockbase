@@ -23,22 +23,41 @@ pub struct RtParams {
     token: Option<String>,
 }
 
+/// Per-subscription cache of each topic's VIEW rule: `(version, topic -> rule)`,
+/// with the inner `None` meaning "no such collection". Without it `visible` took
+/// the DB mutex once per event per subscriber — O(subscribers x events) round-trips
+/// on the hot path.
+///
+/// Invalidation, not expiry: every `_collections` create/update/delete bumps
+/// `App::cols_version`, and a changed version clears the whole map before the next
+/// event is gated. So an admin tightening a viewRule does apply to already-open
+/// subscriptions, and the staleness window is zero for any event broadcast after
+/// the PATCH response returns.
+type RuleCache = (u64, std::collections::HashMap<String, Option<Option<String>>>);
+
 /// Fail closed: forward an event only if this subscriber could read the record.
 /// Reuses the same rule primitives as `records::gate_record` — in-memory rather
 /// than SQL, because a delete event's row is already gone by delivery time.
-fn visible(app: &App, w: &Who, topic: &str, record: &Value) -> bool {
+fn visible(app: &App, w: &Who, topic: &str, record: &Value, cache: &mut RuleCache) -> bool {
     if matches!(w, Who::Admin) {
         return true;
     }
     let Some(data) = record.as_object() else {
         return false;
     };
-    // Short synchronous lock, never held across an await — see auth::who.
-    let col = get_collection(&app.db.lock().unwrap(), topic);
-    let Some(col) = col else {
-        return false;
+    let version = app.cols_version.load(std::sync::atomic::Ordering::SeqCst);
+    if cache.0 != version {
+        cache.0 = version;
+        cache.1.clear();
+    }
+    let rule = cache.1.entry(topic.to_string()).or_insert_with(|| {
+        // Short synchronous lock, never held across an await — see auth::who.
+        get_collection(&app.db.lock().unwrap(), topic).map(|c| c.rules[VIEW].clone())
+    });
+    let Some(rule) = rule else {
+        return false; // no such collection
     };
-    match check_rule(w, &col.rules[VIEW]) {
+    match check_rule(w, rule) {
         Ok(None) => true,                                       // admin-bypass or public
         Ok(Some(expr)) => eval_rule_mem(&expr, auth_id(w), data),
         Err(_) => false,                                        // NULL rule = admin only
@@ -68,6 +87,7 @@ pub async fn realtime(
         .filter(|t| !t.is_empty())
         .collect();
 
+    let mut rules: RuleCache = (0, Default::default());
     let rx = app.events.subscribe();
     let hello = tokio_stream::once(Ok::<_, Infallible>(Event::default().data(
         json!({ "clientId": uuid::Uuid::new_v4().simple().to_string() }).to_string(),
@@ -78,7 +98,7 @@ pub async fn realtime(
         if !topics.is_empty() && !topics.contains(&topic) {
             return None;
         }
-        visible(&app, &w, &topic, ev.get("record")?)
+        visible(&app, &w, &topic, ev.get("record")?, &mut rules)
             .then(|| Ok(Event::default().data(ev.to_string())))
     });
     Sse::new(hello.chain(changes)).keep_alive(KeepAlive::default())

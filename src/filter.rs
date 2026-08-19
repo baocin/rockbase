@@ -115,6 +115,19 @@ fn text(v: &Json) -> String {
     }
 }
 
+/// Escape LIKE metacharacters so a `~` value matches literally, mirroring `eval`'s
+/// substring test. Paired with `ESCAPE '\\'` in the emitted SQL.
+fn like_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 impl Node {
     /// A WHERE fragment plus its binds, in placeholder order. Callers AND it into
     /// a larger WHERE, so a top-level OR is parenthesised here — otherwise
@@ -166,9 +179,12 @@ impl Node {
                     // the parser rejects every other shape on the right of a LIKE
                     _ => String::new(),
                 };
-                out.push_str(&format!("({} {not}LIKE ?)", l.sql(auth, binds)));
-                // ponytail: % and _ inside a ~ value act as LIKE wildcards; add ESCAPE clause if it bites
-                binds.push(Value::Text(format!("%{pat}%")));
+                // `~` means "contains this text", so % and _ in the value are literal
+                // characters, not wildcards. Without the escape the SQL backend would
+                // treat them as wildcards while `eval` treats them literally, and the
+                // two backends must agree — for `!~` the looser one grants access.
+                out.push_str(&format!("({} {not}LIKE ? ESCAPE '\\')", l.sql(auth, binds)));
+                binds.push(Value::Text(format!("%{}%", like_escape(&pat))));
             }
             Node::Cmp(l, op, r) => {
                 let (ls, rs) = (l.sql(auth, binds), r.sql(auth, binds));
@@ -196,7 +212,13 @@ impl Node {
                     return false;
                 }
                 if *op == "~" || *op == "!~" {
-                    return text(&lv).contains(&text(&rv)) == (*op == "~");
+                    // SQLite LIKE is ASCII case-insensitive and `to_sql` emits LIKE, so
+                    // match that here. Case-sensitive `contains` made this backend the
+                    // more permissive one for `!~`, i.e. create could grant what update
+                    // refused — exactly the divergence the shared AST exists to prevent.
+                    let hay = text(&lv).to_ascii_lowercase();
+                    let needle = text(&rv).to_ascii_lowercase();
+                    return hay.contains(&needle) == (*op == "~");
                 }
                 match (num(&lv), num(&rv)) {
                     (Some(a), Some(b)) => match *op {
@@ -407,11 +429,11 @@ mod tests {
     #[test]
     fn like_ops() {
         let (frag, binds) = compile("title~'rock'").unwrap();
-        assert_eq!(frag, "(json_extract(data, '$.title') LIKE ?)");
+        assert_eq!(frag, "(json_extract(data, '$.title') LIKE ? ESCAPE '\\')");
         assert_eq!(binds, vec![Text("%rock%".into())]);
 
         let (frag, binds) = compile("title!~'rock'").unwrap();
-        assert_eq!(frag, "(json_extract(data, '$.title') NOT LIKE ?)");
+        assert_eq!(frag, "(json_extract(data, '$.title') NOT LIKE ? ESCAPE '\\')");
         assert_eq!(binds, vec![Text("%rock%".into())]);
     }
 
@@ -475,5 +497,49 @@ mod tests {
         // an And root needs no wrap, and must not gain one (filter unit tests pin the SQL)
         let (sql, _) = parse("a = 1 && b = 2", Mode::Rule).unwrap().to_sql("");
         assert!(!sql.starts_with("(("), "And root should not be double-wrapped: {sql}");
+    }
+
+    // The two backends must return the same verdict for the same rule and data —
+    // that is the reason they share one AST. LIKE was the last place they disagreed:
+    // `eval` did case-sensitive `contains` while `to_sql` emitted case-insensitive
+    // LIKE, and an unescaped % in the value was a wildcard on one side and a literal
+    // on the other. For `!~` the looser backend GRANTS, so this is access control.
+    #[test]
+    fn like_backends_agree() {
+        use serde_json::json;
+        let cases = [
+            ("title ~ 'ROCK'", json!({"title": "rockbase"}), true),
+            ("title ~ 'rock'", json!({"title": "ROCKBASE"}), true),
+            ("title !~ 'ROCK'", json!({"title": "rockbase"}), false),
+            // % is a literal character in a `~` value, not a wildcard
+            ("title ~ '50%'", json!({"title": "up 50% today"}), true),
+            ("title ~ 'a%z'", json!({"title": "abcz"}), false),
+            ("title ~ '_'", json!({"title": "abc"}), false),
+        ];
+        // Run BOTH backends for real: eval in memory, and to_sql against SQLite. Asserting
+        // the bind string alone would only prove two separate claims, not that they agree.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE records(data TEXT NOT NULL);").unwrap();
+        for (rule, rec, want) in cases {
+            let node = parse(rule, Mode::Rule).unwrap();
+            let data = rec.as_object().unwrap().clone();
+            assert_eq!(node.eval("", &data), want, "in-memory verdict for {rule} on {rec}");
+
+            conn.execute("DELETE FROM records", []).unwrap();
+            conn.execute("INSERT INTO records(data) VALUES(?1)", [rec.to_string()])
+                .unwrap();
+            let (frag, binds) = node.to_sql("");
+            let hit: bool = conn
+                .query_row(
+                    &format!("SELECT EXISTS(SELECT 1 FROM records WHERE {frag})"),
+                    rusqlite::params_from_iter(binds.iter()),
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(hit, want, "SQL verdict for {rule} on {rec} disagrees with eval");
+        }
+        // and the escape actually reaches the bind
+        let (_, binds) = compile("title~'50%'").unwrap();
+        assert_eq!(binds, vec![Text("%50\\%%".into())]);
     }
 }
