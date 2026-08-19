@@ -45,6 +45,9 @@ pub struct App {
     /// are dropped when the identity is seen again. Move it into SQLite (or Redis) if
     /// rockbase ever runs as more than one process.
     pub login_fails: Mutex<HashMap<(String, String), (u32, Instant)>>,
+    /// `RB_CORS_ORIGINS`, split on commas and trimmed. Empty = the wide-open `*`
+    /// default that local dev and the test suite rely on.
+    pub cors_origins: Vec<String>,
 }
 
 pub type S = Arc<App>;
@@ -61,8 +64,35 @@ pub fn ident_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok" }))
+/// One round trip that proves the database FILE is reachable, not merely that the
+/// library links: `sqlite_version()` is answered from memory, but the `_params`
+/// subquery has to read a real page. O(1) — `_params` holds a handful of rows and
+/// never grows with user data, and its count is deliberately not in the body.
+pub fn db_status(conn: &rusqlite::Connection) -> Result<Value, rusqlite::Error> {
+    let (sqlite, _params): (String, i64) = conn.query_row(
+        "SELECT sqlite_version(), (SELECT count(*) FROM _params)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(json!({ "status": "ok", "db": "ok", "sqlite": sqlite }))
+}
+
+/// Fail closed: an unreadable database is 503, never a panic and never a false 200.
+fn health_reply(status: Result<Value, rusqlite::Error>) -> (StatusCode, Json<Value>) {
+    match status {
+        Ok(v) => (StatusCode::OK, Json(v)),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "error", "db": "error", "error": e.to_string() })),
+        ),
+    }
+}
+
+async fn health(axum::extract::State(s): axum::extract::State<S>) -> (StatusCode, Json<Value>) {
+    // The guard is dropped on this line: a load-balancer poll holds a connection for
+    // one cheap query and never blocks a real request behind it.
+    let status = db_status(&s.db.get());
+    health_reply(status)
 }
 
 // Compile-time constant on purpose: nothing runtime (admin token, jwt secret) is ever
@@ -74,15 +104,21 @@ async fn admin_ui() -> axum::response::Html<&'static str> {
     axum::response::Html(ADMIN_HTML)
 }
 
-// ponytail: permissive CORS (allow *, no credentials), split per-origin if anyone needs cookies.
-// Also the request log — same wrap, so one layer instead of two.
+// CORS plus the request log — same wrap, so one layer instead of two. No credentials
+// either way, so `*` stays a safe default; `RB_CORS_ORIGINS` narrows it to an allowlist.
 async fn cors_and_log(
+    axum::extract::State(s): axum::extract::State<S>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let method = req.method().clone();
     let path = req.uri().path().to_string();
+    let origin = req
+        .headers()
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let start = std::time::Instant::now();
     // preflight short-circuits before routing, so unregistered OPTIONS is 204, not 404/405
     let mut resp = if method == axum::http::Method::OPTIONS {
@@ -92,7 +128,20 @@ async fn cors_and_log(
     };
     let hv = axum::http::HeaderValue::from_static;
     let h = resp.headers_mut();
-    h.insert("access-control-allow-origin", hv("*"));
+    if s.cors_origins.is_empty() {
+        h.insert("access-control-allow-origin", hv("*"));
+    } else {
+        // The response now depends on the request's Origin, so a shared cache must not
+        // reuse one origin's allow header for another. A rejected origin gets no
+        // allow-origin header at all — the status is untouched, the browser blocks it.
+        h.insert("vary", hv("Origin"));
+        if let Some(v) = origin
+            .filter(|o| s.cors_origins.iter().any(|a| a == o))
+            .and_then(|o| axum::http::HeaderValue::from_str(&o).ok())
+        {
+            h.insert("access-control-allow-origin", v);
+        }
+    }
     h.insert(
         "access-control-allow-methods",
         hv("GET, POST, PATCH, DELETE, OPTIONS"),
@@ -130,6 +179,15 @@ pub fn build_app(db: &str, admin_token: String) -> Router {
         admin_token,
         cols_version: AtomicU64::new(0),
         login_fails: Mutex::default(),
+        // Read here, not in `main`: `build_app` is what 16 test files call, and its
+        // signature is fixed — same reasoning as RB_JWT_SECRET above.
+        cors_origins: std::env::var("RB_CORS_ORIGINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+            .map(str::to_string)
+            .collect(),
     });
     Router::new()
         .route("/api/health", get(health))
@@ -194,6 +252,38 @@ pub fn build_app(db: &str, admin_token: String) -> Router {
         // axum's default is 2MB; this raises it and caps multipart uploads, which
         // turn into 413 mid-stream — before the row or the bytes are written
         .layer(axum::extract::DefaultBodyLimit::max(files::MAX_BODY))
-        .layer(axum::middleware::from_fn(cors_and_log))
+        .layer(axum::middleware::from_fn_with_state(
+            app.clone(),
+            cors_and_log,
+        ))
         .with_state(app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 503 path cannot be reached from outside the process — once the server owns
+    /// the connection, deleting the file leaves the open fd working and WAL keeps a
+    /// shared lock for the connection's lifetime (see the note at the bottom of
+    /// tests/ops.rs). So break the connection from in here instead: drop the table the
+    /// check reads, which is exactly what a corrupt or truncated database looks like to
+    /// the query. It must degrade to 503, not panic.
+    #[test]
+    fn unreadable_database_is_503_not_a_panic() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init_db(&conn);
+        let (ok, body) = health_reply(db_status(&conn));
+        assert_eq!(ok, StatusCode::OK, "{:?}", body.0);
+        assert_eq!(body.0["db"], "ok");
+        assert!(body.0["sqlite"].is_string(), "{:?}", body.0);
+
+        conn.execute_batch("DROP TABLE _params").unwrap();
+        let status = db_status(&conn);
+        assert!(status.is_err(), "a missing table must not read as healthy");
+        let (code, body) = health_reply(status);
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["status"], "error");
+        assert_eq!(body.0["db"], "error");
+    }
 }
