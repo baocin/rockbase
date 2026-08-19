@@ -44,7 +44,7 @@ const SHORTPW: &str = "abc";
 
 fn app() -> Router {
     std::env::set_var("RB_JWT_SECRET", "testsecret");
-    build_app(Connection::open_in_memory().unwrap(), "testtoken".into())
+    build_app(":memory:", "testtoken".into())
 }
 
 /// A file-backed app plus a second connection to the same DB, so a test can age a
@@ -57,8 +57,7 @@ fn app_on_disk(tag: &str) -> (Router, Connection, std::path::PathBuf) {
         .as_nanos();
     let path = std::env::temp_dir().join(format!("rockbase-authflow-{tag}-{nanos}.db"));
     let _ = std::fs::remove_file(&path);
-    let conn = Connection::open(&path).unwrap();
-    let app = build_app(conn, "testtoken".into());
+    let app = build_app(path.to_str().unwrap(), "testtoken".into());
     let side = Connection::open(&path).unwrap();
     side.busy_timeout(std::time::Duration::from_millis(5000))
         .unwrap();

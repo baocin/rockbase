@@ -16,7 +16,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -59,7 +58,7 @@ fn sandbox() -> &'static PathBuf {
 fn app() -> Router {
     sandbox();
     std::env::set_var("RB_JWT_SECRET", "testsecret");
-    build_app(Connection::open_in_memory().unwrap(), "testtoken".into())
+    build_app(":memory:", "testtoken".into())
 }
 
 // ---------------------------------------------------------------- HTTP helpers

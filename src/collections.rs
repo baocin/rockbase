@@ -101,7 +101,7 @@ fn read_rule(body: &Value, key: &str) -> Result<Option<Option<String>>, (StatusC
 
 pub async fn collections_list(State(app): State<S>, headers: HeaderMap) -> Reply {
     require_admin(&app, &headers)?;
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     let mut stmt = db
         .prepare(
             "SELECT name, type, schema, list_rule, view_rule, create_rule, update_rule, \
@@ -150,7 +150,7 @@ pub async fn collections_create(
             rules[i] = r;
         }
     }
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     let n = db
         .execute(
             "INSERT OR IGNORE INTO _collections\
@@ -188,7 +188,7 @@ pub async fn collections_get(
     Path(name): Path<String>,
 ) -> Reply {
     require_admin(&app, &headers)?;
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     let Some(c) = get_collection(&db, &name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     };
@@ -224,7 +224,7 @@ pub async fn collections_update(
         }
         None => None,
     };
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     if get_collection(&db, &name).is_none() {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     }
@@ -254,7 +254,7 @@ pub async fn collections_delete(
     Path(name): Path<String>,
 ) -> Reply {
     require_admin(&app, &headers)?;
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     let n = db
         .execute("DELETE FROM _collections WHERE name = ?1", [&name])
         .unwrap();
@@ -264,7 +264,7 @@ pub async fn collections_delete(
     db.execute("DELETE FROM records WHERE collection = ?1", [&name])
         .unwrap();
     bump(&app);
-    drop(db); // never do file IO under the mutex
+    drop(db); // never do file IO while holding a connection
     crate::files::remove_collection_files(&name);
     Ok(Json(json!({})))
 }

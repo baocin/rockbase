@@ -121,9 +121,16 @@ pub async fn records_list(
     headers: HeaderMap,
     Query(q): Query<ListParams>,
 ) -> Reply {
-    // who() takes the db lock itself, so it must run before we do
+    // who() checks a connection out itself, so it must run before we do
     let w = who(&app, &headers);
-    let db = app.db.lock().unwrap();
+    let conn = app.db.get();
+    // The COUNT and the page SELECT are two queries; on a pool they are on the same
+    // connection but not the same snapshot, so a write committing between them makes
+    // `totalItems` disagree with `items`. One deferred read transaction pins both.
+    // Cheap under WAL: readers never block, and the tx rolls back (reads only) on drop.
+    let db = conn
+        .unchecked_transaction()
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let Some(col) = get_collection(&db, &name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     };
@@ -560,11 +567,11 @@ pub async fn record_create(
     headers: HeaderMap,
     req: Request,
 ) -> Reply {
-    // who() takes the db lock itself, so it must run before we do
+    // who() checks a connection out itself, so it must run before we do
     let w = who(&app, &headers);
-    // every await happens here, before the lock: JSON body or multipart, same shape
+    // every await happens here, before checkout: JSON body or multipart, same shape
     let up = read_body(req, &app).await?;
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     if !up.files.is_empty() {
         let Some(col) = get_collection(&db, &name) else {
             return Err(err(StatusCode::NOT_FOUND, "no such collection"));
@@ -586,7 +593,7 @@ pub async fn record_view(
     Query(q): Query<ListParams>,
 ) -> Reply {
     let w = who(&app, &headers);
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     let Some(col) = get_collection(&db, &name) else {
         return Err(err(StatusCode::NOT_FOUND, "no such collection"));
     };
@@ -609,7 +616,7 @@ pub async fn record_update(
 ) -> Reply {
     let w = who(&app, &headers);
     let up = read_body(req, &app).await?;
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     if !up.files.is_empty() {
         let Some(col) = get_collection(&db, &name) else {
             return Err(err(StatusCode::NOT_FOUND, "no such collection"));
@@ -630,7 +637,7 @@ pub async fn record_delete(
     headers: HeaderMap,
 ) -> Reply {
     let w = who(&app, &headers);
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     let (out, event) = delete_core(&db, &w, &name, &id)?;
     drop(db);
     remove_record_files(&name, &id);

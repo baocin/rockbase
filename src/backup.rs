@@ -30,7 +30,7 @@ pub async fn backup_download(
         .ok_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, "bad temp path"))?
         .to_string();
     {
-        let db = app.db.lock().unwrap();
+        let db = app.db.get();
         // VACUUM INTO writes a compacted, consistent copy; works from
         // in-memory DBs too (SQLite >= 3.27). Path binds as a parameter.
         db.execute("VACUUM INTO ?1", [&tmp_str]).map_err(|e| {

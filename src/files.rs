@@ -118,7 +118,7 @@ fn mp_err(e: axum::extract::multipart::MultipartError) -> (StatusCode, Json<Valu
 }
 
 /// Read the whole request body. ALL awaiting happens here, before any caller takes
-/// the DB mutex — the multipart parse must never run while the lock is held.
+/// a pooled connection — the multipart parse must never run while one is held.
 pub async fn read_body(req: Request, state: &S) -> Result<Upload, (StatusCode, Json<Value>)> {
     let ct = req
         .headers()
@@ -280,10 +280,10 @@ pub async fn file_serve(
             "invalid collection or record id",
         ));
     };
-    // who() takes the db lock itself, so it must run before we do
+    // who() checks a connection out itself, so it must run before we do
     let w = who(&app, &headers);
     {
-        let db = app.db.lock().unwrap();
+        let db = app.db.get();
         let Some(c) = get_collection(&db, &col) else {
             return Err(err(StatusCode::NOT_FOUND, "no such collection"));
         };

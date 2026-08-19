@@ -13,20 +13,21 @@ pub mod records;
 pub mod rules;
 
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::{
     http::StatusCode,
     routing::{get, post},
     Json, Router,
 };
-use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 pub struct App {
-    // ponytail: single Mutex<Connection>, swap for r2d2 pool if concurrency matters
-    pub db: Mutex<Connection>,
+    /// Hand-rolled connection pool (`db::Pool`) — handlers check a connection out
+    /// for the duration of one synchronous stretch and the guard returns it on drop.
+    /// Never hold one across an `.await`.
+    pub db: db::Pool,
     pub events: broadcast::Sender<Value>,
     pub jwt_secret: String,
     pub admin_token: String,
@@ -98,20 +99,22 @@ async fn cors_and_log(
     resp
 }
 
-pub fn build_app(conn: Connection, admin_token: String) -> Router {
-    db::harden(&conn);
-    db::init_db(&conn);
+/// `db` is a filesystem path or `":memory:"`; the pool opens its own connections
+/// (each already hardened — WAL + busy_timeout).
+pub fn build_app(db: &str, admin_token: String) -> Router {
+    let pool = db::Pool::open(db, db::pool_size());
+    db::init_db(&pool.get());
     let jwt_secret = match std::env::var("RB_JWT_SECRET") {
         Ok(s) => s,
         Err(_) => db::param_get_or_create(
-            &conn,
+            &pool.get(),
             "jwt_secret",
             &uuid::Uuid::new_v4().simple().to_string(),
         ),
     };
     let (tx, _) = broadcast::channel(64);
     let app = Arc::new(App {
-        db: Mutex::new(conn),
+        db: pool,
         events: tx,
         jwt_secret,
         admin_token,

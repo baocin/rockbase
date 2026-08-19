@@ -31,8 +31,10 @@ pub enum Who {
 /// signature, expired, malformed — and also for a token whose user has since been
 /// deleted, which behaves exactly like no token at all.
 ///
-/// ponytail: this locks app.db itself — never call it while already holding the
-/// lock. Every call site resolves identity before the handler takes the lock.
+/// ponytail: this checks a pooled connection out itself — never call it while
+/// already holding one. Every call site resolves identity before the handler
+/// checks out, so no request ever needs two connections (which could deadlock a
+/// fully checked-out pool).
 fn from_jwt(app: &App, t: &str) -> Option<Who> {
     let t = decode::<Claims>(
         t,
@@ -41,7 +43,7 @@ fn from_jwt(app: &App, t: &str) -> Option<Who> {
     )
     .ok()?;
     let c = t.claims;
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     let exists: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM records WHERE collection = ?1 AND id = ?2)",
@@ -131,7 +133,7 @@ pub async fn auth_refresh(
     // ponytail: no auth-collection type check — a User token only ever names an
     // auth collection, and who() already proved the record exists there.
     let token = make_token(&app, &col, &id)?;
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     let Some((data, created, updated)) = fetch_record(&db, &name, &id) else {
         return Err(err(StatusCode::NOT_FOUND, "record not found")); // race: deleted since who()
     };
@@ -146,7 +148,7 @@ pub async fn auth_with_password(
     Path(name): Path<String>,
     Json(body): Json<Value>,
 ) -> Reply {
-    let db = app.db.lock().unwrap();
+    let db = app.db.get();
     // ponytail: auth-with-password is deliberately not rule-gated — the login
     // endpoint has to work before the caller has any identity to test.
     let Some(col) = get_collection(&db, &name) else {

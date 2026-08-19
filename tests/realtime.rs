@@ -14,7 +14,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::time::timeout;
 use tower::ServiceExt;
@@ -32,7 +31,7 @@ const QUIET_MS: u64 = 300;
 
 fn app() -> Router {
     std::env::set_var("RB_JWT_SECRET", "testsecret");
-    build_app(Connection::open_in_memory().unwrap(), "testtoken".into())
+    build_app(":memory:", "testtoken".into())
 }
 
 async fn call(

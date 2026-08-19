@@ -42,7 +42,7 @@ const EXIT_WAIT: Duration = Duration::from_secs(10);
 // ------------------------------------------------------------- in-process
 
 fn app() -> Router {
-    build_app(Connection::open_in_memory().unwrap(), "testtoken".into())
+    build_app(":memory:", "testtoken".into())
 }
 
 async fn call(

@@ -9,19 +9,18 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use rusqlite::Connection;
 use tower::ServiceExt;
 
 use rockbase::build_app;
 
 fn app() -> Router {
     std::env::set_var("RB_JWT_SECRET", "testsecret");
-    build_app(Connection::open_in_memory().unwrap(), "testtoken".into())
+    build_app(":memory:", "testtoken".into())
 }
 
 fn app_with(admin_token: &str) -> Router {
     std::env::set_var("RB_JWT_SECRET", "testsecret");
-    build_app(Connection::open_in_memory().unwrap(), admin_token.into())
+    build_app(":memory:", admin_token.into())
 }
 
 /// Raw GET: status, headers, body as a String (the page is UTF-8 HTML).

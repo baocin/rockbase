@@ -40,7 +40,7 @@ const DEADLINE: Duration = Duration::from_secs(60);
 
 fn app_mem() -> Router {
     std::env::set_var("RB_JWT_SECRET", "testsecret");
-    build_app(Connection::open_in_memory().unwrap(), "testtoken".into())
+    build_app(":memory:", "testtoken".into())
 }
 
 /// A file-backed DB — the only place WAL and real multi-connection locking exist.
@@ -57,7 +57,7 @@ impl TempDb {
     }
     fn app(&self) -> Router {
         std::env::set_var("RB_JWT_SECRET", "testsecret");
-        build_app(Connection::open(&self.0).unwrap(), "testtoken".into())
+        build_app(self.0.to_str().unwrap(), "testtoken".into())
     }
 }
 

@@ -59,7 +59,7 @@ fn one(db: &Connection, w: &Who, req: &Value) -> Effect {
 }
 
 pub async fn batch(State(app): State<S>, headers: HeaderMap, Json(body): Json<Value>) -> Reply {
-    // who() locks the db itself, so identity is resolved before we take the lock
+    // who() checks a connection out itself, so identity is resolved before we do
     let w = who(&app, &headers);
     if matches!(w, Who::Guest) {
         return Err(err(StatusCode::UNAUTHORIZED, "auth required"));
@@ -74,9 +74,15 @@ pub async fn batch(State(app): State<S>, headers: HeaderMap, Json(body): Json<Va
         ));
     }
 
-    let mut db = app.db.lock().unwrap();
+    let mut db = app.db.get();
+    // IMMEDIATE, not the default DEFERRED. A batch reads (rule + collection lookups)
+    // before it writes; a deferred tx would take a read snapshot first and then, if any
+    // other pooled connection committed in between, fail the upgrade with SQLITE_BUSY
+    // _SNAPSHOT — which busy_timeout deliberately does NOT retry, because retrying a
+    // stale snapshot can never succeed. Taking the write lock up front is retryable,
+    // so busy_timeout covers it.
     let tx = db
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let mut results = Vec::with_capacity(reqs.len());
     // Events are buffered, never sent inside the tx: on rollback subscribers must not

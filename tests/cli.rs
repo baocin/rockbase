@@ -19,7 +19,6 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
-use rusqlite::Connection;
 use tower::ServiceExt;
 
 use rockbase::build_app;
@@ -28,7 +27,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_rockbase");
 const BOOT: Duration = Duration::from_secs(20);
 
 fn app() -> Router {
-    build_app(Connection::open_in_memory().unwrap(), "testtoken".into())
+    build_app(":memory:", "testtoken".into())
 }
 
 /// Send one request through the router and hand back status + headers + body.

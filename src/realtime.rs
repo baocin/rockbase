@@ -25,7 +25,7 @@ pub struct RtParams {
 
 /// Per-subscription cache of each topic's VIEW rule: `(version, topic -> rule)`,
 /// with the inner `None` meaning "no such collection". Without it `visible` took
-/// the DB mutex once per event per subscriber — O(subscribers x events) round-trips
+/// a pooled connection once per event per subscriber — O(subscribers x events)
 /// on the hot path.
 ///
 /// Invalidation, not expiry: every `_collections` create/update/delete bumps
@@ -55,7 +55,7 @@ fn visible(app: &App, w: &Who, topic: &str, record: &Value, cache: &mut RuleCach
     }
     let rule = cache.1.entry(topic.to_string()).or_insert_with(|| {
         // Short synchronous lock, never held across an await — see auth::who.
-        get_collection(&app.db.lock().unwrap(), topic).map(|c| c.rules[VIEW].clone())
+        get_collection(&app.db.get(), topic).map(|c| c.rules[VIEW].clone())
     });
     let Some(rule) = rule else {
         return false; // no such collection

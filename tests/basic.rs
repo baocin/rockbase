@@ -12,7 +12,7 @@ const ADMIN: &str = "Admin testtoken";
 
 fn app() -> Router {
     std::env::set_var("RB_JWT_SECRET", "testsecret");
-    build_app(Connection::open_in_memory().unwrap(), "testtoken".into())
+    build_app(":memory:", "testtoken".into())
 }
 
 async fn call(
@@ -174,7 +174,7 @@ async fn backups() {
 #[tokio::test]
 async fn wal_persists_on_file_db() {
     let path = scratch("wal.db");
-    let _app = build_app(Connection::open(&path).unwrap(), "testtoken".into());
+    let _app = build_app(path.to_str().unwrap(), "testtoken".into());
     // fresh second connection: WAL mode is persistent in the file
     let conn = Connection::open(&path).unwrap();
     let mode: String = conn
