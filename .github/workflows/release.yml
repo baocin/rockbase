@@ -32,7 +32,12 @@ jobs:
           - { os: macos-13,       target: x86_64-apple-darwin,        ext: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,     ext: ".exe" }
     steps:
+      # workflow_dispatch checks out the DEFAULT BRANCH unless told otherwise, which
+      # would publish binaries built from main under whatever tag was requested —
+      # artifacts that do not match the commit they claim to be.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
