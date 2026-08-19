@@ -7,12 +7,14 @@ use axum::{
     Json,
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::db::get_collection;
-use crate::records::{fetch_record, record_json, token_epoch};
+use crate::db::{get_collection, now};
+use crate::records::{
+    broadcast_change, change, fetch_record, record_json, token_epoch, update_core, VERIFIED_FIELD,
+};
 use crate::{err, App, Reply, S};
 
 #[derive(Serialize, Deserialize)]
@@ -272,4 +274,201 @@ pub async fn auth_with_password(
         "token": token,
         "record": record_json(&name, &id, &data, &created, &updated),
     })))
+}
+
+// ------------------------------------------- password reset / email verification
+//
+// There is no mailer and none is being added. A ticket is an opaque random row in
+// `_tokens`, DELETEd the moment it is spent — a stateless JWT cannot be burned after
+// one use, and single use is the entire point. The request endpoints answer a
+// byte-identical `{}` whether or not the address exists and never echo the token, so
+// an unauthenticated caller has no endpoint at all that returns token material. The
+// only read path is admin-only `GET /api/tokens`: that is the mailer integration
+// point, and it leaks no new privilege, since admin already has `GET /api/backups`,
+// i.e. the whole database.
+
+const RESET: &str = "password_reset";
+const VERIFY: &str = "verification";
+/// How long a ticket stays spendable.
+const TOKEN_TTL_SECS: i64 = 3600;
+
+/// Mint a ticket. The material is a v4 uuid — 122 random bits from the OS CSPRNG,
+/// which is not guessable and not enumerable, and `uuid` is already a dependency.
+///
+/// `created` and `expires` come from the same statement: SQLite evaluates `'now'`
+/// once per step, so the gap is exactly TOKEN_TTL_SECS with no clock skew between them.
+fn issue_token(db: &Connection, col: &str, id: &str, ty: &str) -> rusqlite::Result<()> {
+    db.execute(
+        "INSERT INTO _tokens(token, collection, record, type, created, expires) \
+         VALUES(?1, ?2, ?3, ?4, strftime('%Y-%m-%d %H:%M:%f','now'), \
+                strftime('%Y-%m-%d %H:%M:%f','now', ?5))",
+        params![
+            uuid::Uuid::new_v4().simple().to_string(),
+            col,
+            id,
+            ty,
+            format!("+{TOKEN_TTL_SECS} seconds")
+        ],
+    )?;
+    Ok(())
+}
+
+/// The record id behind an address, or None — including when the collection does not
+/// exist or is not an auth collection. Every None takes the same silent path.
+fn auth_record_by_email(db: &Connection, col: &str, email: &str) -> Option<String> {
+    if get_collection(db, col)?.ty != "auth" {
+        return None;
+    }
+    db.query_row(
+        "SELECT id FROM records WHERE collection = ?1 AND json_extract(data, '$.email') = ?2",
+        params![col, email],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+/// Shared body of both request endpoints: mint a ticket if the address resolves, and
+/// say exactly the same thing either way.
+fn request_ticket(app: &App, name: &str, body: &Value, ty: &str) -> Reply {
+    let email = body.get("email").and_then(|v| v.as_str()).unwrap_or("");
+    let db = app.db.get();
+    if let Some(id) = auth_record_by_email(&db, name, email) {
+        // A failed INSERT is swallowed on purpose: an error body is an oracle too.
+        let _ = issue_token(&db, name, &id, ty);
+    }
+    Ok(Json(json!({})))
+}
+
+/// Look a ticket up without spending it — the row is burned only once the change it
+/// authorises has actually landed, so a password rejected by policy is a retry, not a
+/// permanent lockout.
+///
+/// Unknown, forged, wrong-collection, wrong-type, already-spent and expired all return
+/// this one error: distinguishing them would confirm which tokens were ever real.
+fn take_ticket(
+    db: &Connection,
+    col: &str,
+    ty: &str,
+    token: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    db.query_row(
+        "SELECT record FROM _tokens WHERE token = ?1 AND collection = ?2 AND type = ?3 \
+         AND expires > strftime('%Y-%m-%d %H:%M:%f','now')",
+        params![token, col, ty],
+        |r| r.get(0),
+    )
+    .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid or expired token"))
+}
+
+fn oops(e: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+    err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+pub async fn request_password_reset(
+    State(app): State<S>,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Reply {
+    request_ticket(&app, &name, &body, RESET)
+}
+
+pub async fn request_verification(
+    State(app): State<S>,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Reply {
+    request_ticket(&app, &name, &body, VERIFY)
+}
+
+pub async fn confirm_password_reset(
+    State(app): State<S>,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Reply {
+    let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    let password = body.get("password").cloned().unwrap_or(Value::Null);
+    let db = app.db.get();
+    // One transaction so the change and the burn commit together, and so an error on
+    // either rolls both back — a rejected password must leave the ticket spendable.
+    let tx = db.unchecked_transaction().map_err(oops)?;
+    let id = take_ticket(&tx, &name, RESET, token)?;
+    // Who::Admin: the ticket IS the proof, so there is no oldPassword to demand.
+    // update_core owns the password policy and already bumps `token_epoch` on a
+    // password change, which is what kills every session issued before the reset.
+    // Reused, not reimplemented — a second revocation mechanism would drift.
+    let (_, event) = update_core(
+        &tx,
+        &Who::Admin,
+        &name,
+        &id,
+        &json!({ "password": password }),
+    )?;
+    tx.execute("DELETE FROM _tokens WHERE token = ?1", params![token])
+        .map_err(oops)?;
+    tx.commit().map_err(oops)?;
+    drop(db);
+    broadcast_change(&app, event);
+    Ok(Json(json!({})))
+}
+
+pub async fn confirm_verification(
+    State(app): State<S>,
+    Path(name): Path<String>,
+    Json(body): Json<Value>,
+) -> Reply {
+    let token = body.get("token").and_then(|v| v.as_str()).unwrap_or("");
+    let db = app.db.get();
+    let tx = db.unchecked_transaction().map_err(oops)?;
+    let id = take_ticket(&tx, &name, VERIFY, token)?;
+    let ts = now(&tx);
+    // `verified` is not a schema field, so it cannot go through update_core (validate
+    // would call it unknown — which is exactly what keeps clients from writing it).
+    // VERIFIED_FIELD is a const, so the path is not attacker-influenced.
+    tx.execute(
+        &format!(
+            "UPDATE records SET data = json_set(data, '$.{VERIFIED_FIELD}', json('true')), \
+             updated = ?1 WHERE collection = ?2 AND id = ?3"
+        ),
+        params![ts, name, id],
+    )
+    .map_err(oops)?;
+    tx.execute("DELETE FROM _tokens WHERE token = ?1", params![token])
+        .map_err(oops)?;
+    let rec = fetch_record(&tx, &name, &id)
+        .map(|(data, created, updated)| record_json(&name, &id, &data, &created, &updated));
+    tx.commit().map_err(oops)?;
+    drop(db);
+    if let Some(rec) = rec {
+        broadcast_change(&app, change("update", &name, rec));
+    }
+    Ok(Json(json!({})))
+}
+
+/// Every outstanding ticket. Admin only — this is the whole mailer hook, and the only
+/// place token material is ever readable.
+pub async fn tokens_list(State(app): State<S>, headers: HeaderMap) -> Reply {
+    // require_admin checks a connection out itself, so it must run before we do
+    require_admin(&app, &headers)?;
+    let db = app.db.get();
+    let mut stmt = db
+        .prepare(
+            "SELECT token, collection, record, type, created, expires FROM _tokens \
+             ORDER BY created, rowid",
+        )
+        .map_err(oops)?;
+    let items: Vec<Value> = stmt
+        .query_map([], |r| {
+            Ok(json!({
+                "token": r.get::<_, String>(0)?,
+                "collection": r.get::<_, String>(1)?,
+                "record": r.get::<_, String>(2)?,
+                "type": r.get::<_, String>(3)?,
+                "created": r.get::<_, String>(4)?,
+                "expires": r.get::<_, String>(5)?,
+            }))
+        })
+        .map_err(oops)?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(Json(json!({ "items": items })))
 }

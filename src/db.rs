@@ -143,6 +143,18 @@ pub fn init_db(conn: &Connection) {
             schema TEXT NOT NULL DEFAULT '[]'
         );
         CREATE TABLE IF NOT EXISTS _params(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        -- Password-reset / email-verification tickets. Opaque random rows, not JWTs:
+        -- a stateless token cannot be burned after one use, and single use is the
+        -- whole point. DELETEd when spent; `expires` is a fixed-width timestamp so
+        -- the freshness test is a plain string comparison.
+        CREATE TABLE IF NOT EXISTS _tokens(
+            token      TEXT PRIMARY KEY,
+            collection TEXT NOT NULL,
+            record     TEXT NOT NULL,
+            type       TEXT NOT NULL,
+            created    TEXT NOT NULL,
+            expires    TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS records(
             collection TEXT NOT NULL,
             id         TEXT NOT NULL,

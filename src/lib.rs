@@ -163,6 +163,24 @@ pub fn build_app(db: &str, admin_token: String) -> Router {
             post(auth::auth_refresh),
         )
         .route(
+            "/api/collections/{name}/request-password-reset",
+            post(auth::request_password_reset),
+        )
+        .route(
+            "/api/collections/{name}/confirm-password-reset",
+            post(auth::confirm_password_reset),
+        )
+        .route(
+            "/api/collections/{name}/request-verification",
+            post(auth::request_verification),
+        )
+        .route(
+            "/api/collections/{name}/confirm-verification",
+            post(auth::confirm_verification),
+        )
+        // The only place a reset/verification token can be read back: the mailer hook.
+        .route("/api/tokens", get(auth::tokens_list))
+        .route(
             "/api/files/{collection}/{id}/{filename}",
             get(files::file_serve),
         )

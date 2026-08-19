@@ -26,14 +26,23 @@ fn new_id() -> String {
 /// read it back or set it through the record API.
 pub const EPOCH_FIELD: &str = "token_epoch";
 
-/// Names record_json injects or strips; a schema field may not use them.
-pub const RESERVED_FIELDS: [&str; 6] = [
+/// Whether the address on an auth record has been proven. Server-owned: set false at
+/// signup and flipped only by spending a verification token. Unlike `password_hash` and
+/// `token_epoch` it is NOT stripped by `record_json` — it is meant to be read — but it
+/// is still reserved, so no schema may shadow it and `validate` refuses it as an
+/// unknown field, which is what keeps it unwritable through the record API.
+pub const VERIFIED_FIELD: &str = "verified";
+
+/// Names record_json injects or strips, plus the server-owned ones a client may never
+/// write; a schema field may not use them.
+pub const RESERVED_FIELDS: [&str; 7] = [
     "id",
     "created",
     "updated",
     "collectionName",
     "password_hash",
     EPOCH_FIELD,
+    VERIFIED_FIELD,
 ];
 
 /// The epoch stored on an auth record, or `None` when the row is unreadable — every
@@ -490,7 +499,7 @@ fn check_old_password(
 /// what lets a batch buffer the events and publish them only after its tx commits.
 pub type Effect = Result<(Value, Value), (StatusCode, Json<Value>)>;
 
-fn change(action: &str, topic: &str, record: Value) -> Value {
+pub(crate) fn change(action: &str, topic: &str, record: Value) -> Value {
     json!({ "action": action, "topic": topic, "record": record })
 }
 
@@ -542,6 +551,9 @@ pub fn create_core(db: &Connection, w: &Who, name: &str, body: &Value) -> Effect
         if email_taken(db, name, &email, "") {
             return Err(err(StatusCode::BAD_REQUEST, "email already in use"));
         }
+        // Signing up proves nothing about the address. `validate` already refused a
+        // client-supplied `verified`, so this is the only writer at create time.
+        data.insert(VERIFIED_FIELD.into(), json!(false));
     }
     let id = new_id();
     let ts = now(db);
