@@ -137,7 +137,11 @@ fn item<'a>(list: &'a Value, title: &str) -> &'a Value {
 #[tokio::test]
 async fn schema_accepts_relation_field() {
     let app = app();
-    mkcol_ok(&app, json!({"name": "authors", "schema": [{"name": "name", "type": "text"}]})).await;
+    mkcol_ok(
+        &app,
+        json!({"name": "authors", "schema": [{"name": "name", "type": "text"}]}),
+    )
+    .await;
 
     let (s, v) = mkcol(
         &app,
@@ -147,14 +151,30 @@ async fn schema_accepts_relation_field() {
         ]}),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "relation field must be a valid schema type: {v}");
-    assert_eq!(v["schema"][1]["type"], json!("relation"), "echoed schema: {v}");
-    assert_eq!(v["schema"][1]["options"]["collection"], json!("authors"), "echoed schema: {v}");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "relation field must be a valid schema type: {v}"
+    );
+    assert_eq!(
+        v["schema"][1]["type"],
+        json!("relation"),
+        "echoed schema: {v}"
+    );
+    assert_eq!(
+        v["schema"][1]["options"]["collection"],
+        json!("authors"),
+        "echoed schema: {v}"
+    );
 
     // read back through GET, not just the create echo
     let (s, v) = call(&app, "GET", "/api/collections/posts", Some(ADMIN), None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["schema"][1]["type"], json!("relation"), "stored schema: {v}");
+    assert_eq!(
+        v["schema"][1]["type"],
+        json!("relation"),
+        "stored schema: {v}"
+    );
 
     // self-relation: target need not exist yet / may be the collection itself
     let (s, v) = mkcol(
@@ -174,7 +194,11 @@ async fn schema_accepts_relation_field() {
         ]}),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "unknown target checked per-write, not at schema time: {v}");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "unknown target checked per-write, not at schema time: {v}"
+    );
 }
 
 // A relation field without a usable options.collection is a 400.
@@ -200,8 +224,18 @@ async fn schema_rejects_relation_without_target() {
 #[tokio::test]
 async fn relation_field_cannot_use_reserved_name() {
     let app = app();
-    mkcol_ok(&app, json!({"name": "authors", "schema": [{"name": "name", "type": "text"}]})).await;
-    for name in ["id", "created", "updated", "collectionName", "password_hash"] {
+    mkcol_ok(
+        &app,
+        json!({"name": "authors", "schema": [{"name": "name", "type": "text"}]}),
+    )
+    .await;
+    for name in [
+        "id",
+        "created",
+        "updated",
+        "collectionName",
+        "password_hash",
+    ] {
         let (s, v) = mkcol(
             &app,
             json!({"name": "posts", "schema": [
@@ -209,7 +243,11 @@ async fn relation_field_cannot_use_reserved_name() {
             ]}),
         )
         .await;
-        assert_eq!(s, StatusCode::BAD_REQUEST, "reserved relation name '{name}' must 400: {v}");
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "reserved relation name '{name}' must 400: {v}"
+        );
     }
 }
 
@@ -235,7 +273,10 @@ async fn relation_value_must_be_an_existing_id() {
     .await;
     assert_eq!(s, StatusCode::OK, "post with real author: {v}");
     assert_eq!(v["author"], json!(og), "author echoed as id string: {v}");
-    assert!(v.get("expand").is_none(), "create must not auto-expand: {v}");
+    assert!(
+        v.get("expand").is_none(),
+        "create must not auto-expand: {v}"
+    );
 
     // unknown id -> 400 (DB existence check)
     let (s, v) = call(
@@ -246,7 +287,11 @@ async fn relation_value_must_be_an_existing_id() {
         Some(json!({"title": "dangling", "author": "nope"})),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "unknown relation id must 400: {v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "unknown relation id must 400: {v}"
+    );
 
     // a real id, but in the WRONG collection -> still 400
     let (uid, _) = user(&app, "wrong@example.com").await;
@@ -258,7 +303,11 @@ async fn relation_value_must_be_an_existing_id() {
         Some(json!({"title": "crosscol", "author": uid})),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "id from another collection must 400: {v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "id from another collection must 400: {v}"
+    );
 
     // non-string -> 400 on the type check, before any DB hit
     let (s, v) = call(
@@ -269,7 +318,11 @@ async fn relation_value_must_be_an_existing_id() {
         Some(json!({"title": "typed", "author": 42})),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "non-string relation must 400: {v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "non-string relation must 400: {v}"
+    );
 
     // null is fine on an optional relation
     let (s, v) = call(
@@ -293,20 +346,52 @@ async fn relation_patch_is_validated() {
     let post = mkrec(&app, "posts", json!({"title": "hello", "author": &og})).await;
     let uri = format!("/api/collections/posts/records/{post}");
 
-    let (s, v) = call(&app, "PATCH", &uri, Some(ADMIN), Some(json!({"author": "nope"}))).await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "PATCH to unknown id must 400: {v}");
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(ADMIN),
+        Some(json!({"author": "nope"})),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "PATCH to unknown id must 400: {v}"
+    );
 
-    let (s, v) = call(&app, "PATCH", &uri, Some(ADMIN), Some(json!({"author": &ug}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(ADMIN),
+        Some(json!({"author": &ug})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "PATCH to a real id: {v}");
     assert_eq!(v["author"], json!(ug), "{v}");
 
     // patching an unrelated field must not re-validate (or clobber) the relation
-    let (s, v) = call(&app, "PATCH", &uri, Some(ADMIN), Some(json!({"title": "bye"}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(ADMIN),
+        Some(json!({"title": "bye"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "unrelated PATCH: {v}");
     assert_eq!(v["author"], json!(ug), "relation preserved: {v}");
 
     // explicit null clears an optional relation
-    let (s, v) = call(&app, "PATCH", &uri, Some(ADMIN), Some(json!({"author": null}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(ADMIN),
+        Some(json!({"author": null})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "clearing an optional relation: {v}");
     assert_eq!(v["author"], json!(null), "{v}");
 }
@@ -335,15 +420,35 @@ async fn expand_on_view() {
     assert_eq!(v["author"], json!(og), "raw id stays alongside expand: {v}");
     assert_eq!(v["expand"]["author"]["name"], json!("Og"), "{v}");
     assert_eq!(v["expand"]["author"]["id"], json!(og), "{v}");
-    assert_eq!(v["expand"]["author"]["collectionName"], json!("authors"), "{v}");
-    assert!(v["expand"]["author"]["created"].is_string(), "expanded record is a full record: {v}");
+    assert_eq!(
+        v["expand"]["author"]["collectionName"],
+        json!("authors"),
+        "{v}"
+    );
+    assert!(
+        v["expand"]["author"]["created"].is_string(),
+        "expanded record is a full record: {v}"
+    );
     // one level only: the expanded record is never itself expanded
-    assert!(v["expand"]["author"].get("expand").is_none(), "expand must be one level: {v}");
+    assert!(
+        v["expand"]["author"].get("expand").is_none(),
+        "expand must be one level: {v}"
+    );
 
     // no expand param at all -> no expand key
-    let (s, v) = call(&app, "GET", &format!("/api/collections/posts/records/{post}"), None, None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        &format!("/api/collections/posts/records/{post}"),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert!(v.get("expand").is_none(), "no ?expand= means no expand key: {v}");
+    assert!(
+        v.get("expand").is_none(),
+        "no ?expand= means no expand key: {v}"
+    );
 }
 
 // Unknown names and non-relation fields in ?expand= are silently skipped (PocketBase parity).
@@ -363,8 +468,15 @@ async fn expand_skips_unknown_and_non_relation_fields() {
         None,
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "unknown expand names are skipped, not rejected: {v}");
-    assert!(v.get("expand").is_none(), "nothing resolved -> no expand key at all: {v}");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "unknown expand names are skipped, not rejected: {v}"
+    );
+    assert!(
+        v.get("expand").is_none(),
+        "nothing resolved -> no expand key at all: {v}"
+    );
 
     // a good name mixed with junk still resolves the good one
     let (s, v) = call(
@@ -399,7 +511,10 @@ async fn expand_null_and_dangling_relations() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert!(v.get("expand").is_none(), "null relation resolves nothing: {v}");
+    assert!(
+        v.get("expand").is_none(),
+        "null relation resolves nothing: {v}"
+    );
 
     // now delete the author: the id dangles
     let (s, v) = call(
@@ -421,8 +536,15 @@ async fn expand_null_and_dangling_relations() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "dangling relation must not 404/500: {v}");
-    assert_eq!(v["author"], json!(og), "dangling id is kept on the record: {v}");
-    assert!(v.get("expand").is_none(), "dangling id resolves nothing: {v}");
+    assert_eq!(
+        v["author"],
+        json!(og),
+        "dangling id is kept on the record: {v}"
+    );
+    assert!(
+        v.get("expand").is_none(),
+        "dangling id resolves nothing: {v}"
+    );
 }
 
 // ?expand= works on the list endpoint, per item.
@@ -436,12 +558,30 @@ async fn expand_on_list() {
     mkrec(&app, "posts", json!({"title": "b", "author": &ug})).await;
     mkrec(&app, "posts", json!({"title": "c", "author": null})).await;
 
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records?expand=author", None, None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records?expand=author",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "expand on list: {v}");
     assert_eq!(v["totalItems"], json!(3), "{v}");
-    assert_eq!(item(&v, "a")["expand"]["author"]["name"], json!("Og"), "{v}");
-    assert_eq!(item(&v, "b")["expand"]["author"]["name"], json!("Ug"), "{v}");
-    assert!(item(&v, "c").get("expand").is_none(), "null relation item has no expand: {v}");
+    assert_eq!(
+        item(&v, "a")["expand"]["author"]["name"],
+        json!("Og"),
+        "{v}"
+    );
+    assert_eq!(
+        item(&v, "b")["expand"]["author"]["name"],
+        json!("Ug"),
+        "{v}"
+    );
+    assert!(
+        item(&v, "c").get("expand").is_none(),
+        "null relation item has no expand: {v}"
+    );
 
     // expand survives alongside the other list params
     let (s, v) = call(
@@ -454,15 +594,27 @@ async fn expand_on_list() {
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["totalItems"], json!(1), "{v}");
-    assert_eq!(item(&v, "b")["expand"]["author"]["name"], json!("Ug"), "{v}");
+    assert_eq!(
+        item(&v, "b")["expand"]["author"]["name"],
+        json!("Ug"),
+        "{v}"
+    );
 }
 
 // Several relation fields expand independently in one request.
 #[tokio::test]
 async fn expand_multiple_relations() {
     let app = app();
-    mkcol_ok(&app, json!({"name": "authors", "schema": [{"name": "name", "type": "text"}]})).await;
-    mkcol_ok(&app, json!({"name": "tags", "schema": [{"name": "label", "type": "text"}]})).await;
+    mkcol_ok(
+        &app,
+        json!({"name": "authors", "schema": [{"name": "name", "type": "text"}]}),
+    )
+    .await;
+    mkcol_ok(
+        &app,
+        json!({"name": "tags", "schema": [{"name": "label", "type": "text"}]}),
+    )
+    .await;
     mkcol_ok(
         &app,
         json!({"name": "posts", "schema": [
@@ -494,7 +646,10 @@ async fn expand_multiple_relations() {
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["expand"]["author"]["name"], json!("Og"), "{v}");
     assert_eq!(v["expand"]["editor"]["name"], json!("Ug"), "{v}");
-    assert!(v["expand"].get("tag").is_none(), "only requested fields expand: {v}");
+    assert!(
+        v["expand"].get("tag").is_none(),
+        "only requested fields expand: {v}"
+    );
 
     // whitespace around names is tolerated, and all three expand at once
     let (s, v) = call(
@@ -506,7 +661,11 @@ async fn expand_multiple_relations() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["expand"]["editor"]["name"], json!("Ug"), "trimmed names: {v}");
+    assert_eq!(
+        v["expand"]["editor"]["name"],
+        json!("Ug"),
+        "trimmed names: {v}"
+    );
     assert_eq!(v["expand"]["tag"]["label"], json!("rock"), "{v}");
 }
 
@@ -550,7 +709,11 @@ async fn expand_respects_target_view_rule() {
         None,
     )
     .await;
-    assert_ne!(s, StatusCode::OK, "fixture is wrong: hidden author is directly viewable");
+    assert_ne!(
+        s,
+        StatusCode::OK,
+        "fixture is wrong: hidden author is directly viewable"
+    );
 
     // ...so expand must not hand it over either
     let (s, v) = call(
@@ -581,14 +744,29 @@ async fn expand_respects_target_view_rule() {
     assert_eq!(v["expand"]["author"]["name"], json!("Og"), "{v}");
 
     // and the same holds on the list endpoint, which amplifies the leak N times
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records?expand=author", Some(&tok), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records?expand=author",
+        Some(&tok),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert!(
         !v.to_string().contains("Ghost"),
         "hidden author leaked through list expand: {v}"
     );
-    assert_not_expanded(item(&v, "hidden"), "author", "list expand must not bypass viewRule");
-    assert_eq!(item(&v, "open")["expand"]["author"]["name"], json!("Og"), "{v}");
+    assert_not_expanded(
+        item(&v, "hidden"),
+        "author",
+        "list expand must not bypass viewRule",
+    );
+    assert_eq!(
+        item(&v, "open")["expand"]["author"]["name"],
+        json!("Og"),
+        "{v}"
+    );
 
     // admin still sees everything (rules do not apply to admins)
     let (s, v) = call(
@@ -600,7 +778,11 @@ async fn expand_respects_target_view_rule() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["expand"]["author"]["name"], json!("Ghost"), "admin expand: {v}");
+    assert_eq!(
+        v["expand"]["author"]["name"],
+        json!("Ghost"),
+        "admin expand: {v}"
+    );
 }
 
 // `users` is admin-only by default (viewRule NULL) — expanding into it must
@@ -631,13 +813,21 @@ async fn expand_into_auth_collection_respects_admin_only_rule() {
             None,
         )
         .await;
-        assert_ne!(s, StatusCode::OK, "fixture is wrong: {who} can directly view a users record");
+        assert_ne!(
+            s,
+            StatusCode::OK,
+            "fixture is wrong: {who} can directly view a users record"
+        );
     }
 
     for (tok, who) in [(&owner_tok, "owner"), (&other_tok, "stranger")] {
         let (s, v) = call(&app, "GET", &uri, Some(tok), None).await;
         assert_eq!(s, StatusCode::OK, "the post is public: {v}");
-        assert_not_expanded(&v, "owner", &format!("{who} must not read a users record via expand"));
+        assert_not_expanded(
+            &v,
+            "owner",
+            &format!("{who} must not read a users record via expand"),
+        );
         assert!(
             !v.to_string().contains("owner@example.com"),
             "auth record leaked through expand to {who}: {v}"
@@ -675,7 +865,11 @@ async fn expand_never_exposes_password_hash() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["expand"]["owner"]["id"], json!(owner_id), "admin expand resolves: {v}");
+    assert_eq!(
+        v["expand"]["owner"]["id"],
+        json!(owner_id),
+        "admin expand resolves: {v}"
+    );
     assert!(
         v["expand"]["owner"].get("password_hash").is_none(),
         "expanded auth record must not carry password_hash: {v}"
@@ -686,7 +880,14 @@ async fn expand_never_exposes_password_hash() {
     );
 
     // and on the list endpoint
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records?expand=owner", Some(ADMIN), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records?expand=owner",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert!(
         !v.to_string().contains("password_hash") && !v.to_string().contains("$2b$"),

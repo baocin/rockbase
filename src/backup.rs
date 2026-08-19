@@ -38,13 +38,16 @@ pub async fn backup_download(
             err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
         })?;
     } // lock released before file IO
-    // ponytail: full read into RAM; stream the file if backups outgrow memory.
+      // ponytail: full read into RAM; stream the file if backups outgrow memory.
     let bytes = std::fs::read(&tmp).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
     })?;
     let _ = std::fs::remove_file(&tmp);
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     Ok((
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_string()),

@@ -65,7 +65,14 @@ fn r(method: &str, url: &str, body: Option<Value>) -> Value {
 
 /// POST /api/batch with a `requests` array.
 async fn batch(app: &Router, auth: Option<&str>, requests: Value) -> (StatusCode, Value) {
-    call(app, "POST", "/api/batch", auth, Some(json!({"requests": requests}))).await
+    call(
+        app,
+        "POST",
+        "/api/batch",
+        auth,
+        Some(json!({"requests": requests})),
+    )
+    .await
 }
 
 /// Seed a user through the admin bypass and log in. Returns (id, "Bearer <token>").
@@ -113,7 +120,14 @@ async fn mkposts(app: &Router, extra: Value) {
 }
 
 async fn mkpost(app: &Router, auth: &str, body: Value) -> String {
-    let (s, v) = call(app, "POST", "/api/collections/posts/records", Some(auth), Some(body)).await;
+    let (s, v) = call(
+        app,
+        "POST",
+        "/api/collections/posts/records",
+        Some(auth),
+        Some(body),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "seed post: {v}");
     v["id"].as_str().unwrap().to_string()
 }
@@ -153,11 +167,18 @@ async fn snapshot(app: &Router) -> Value {
 
 /// A batch failure: 400 envelope carrying the inner message and the failing index.
 fn assert_failed_at(s: StatusCode, v: &Value, index: usize, msg_part: &str) {
-    assert_eq!(s, StatusCode::BAD_REQUEST, "batch should fail with 400: {v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "batch should fail with 400: {v}"
+    );
     assert_eq!(v["code"], 400, "error envelope code: {v}");
     assert_eq!(v["index"], json!(index), "failing index: {v}");
     let m = v["message"].as_str().unwrap_or_default();
-    assert!(m.contains(msg_part), "message {m:?} should contain {msg_part:?}: {v}");
+    assert!(
+        m.contains(msg_part),
+        "message {m:?} should contain {msg_part:?}: {v}"
+    );
 }
 
 // ---------------------------------------------------------------- happy paths
@@ -173,17 +194,30 @@ async fn happy_path_two_creates_commit() {
         &app,
         Some(&tok),
         json!([
-            r("POST", "/api/collections/posts/records", Some(json!({"title": "a"}))),
-            r("POST", "/api/collections/posts/records", Some(json!({"title": "b", "views": 3}))),
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": "a"}))
+            ),
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": "b", "views": 3}))
+            ),
         ]),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "batch: {v}");
-    let items = v.as_array().unwrap_or_else(|| panic!("body should be an array: {v}"));
+    let items = v
+        .as_array()
+        .unwrap_or_else(|| panic!("body should be an array: {v}"));
     assert_eq!(items.len(), 2, "one result per request: {v}");
     assert_eq!(items[0]["title"], "a");
     assert_eq!(items[0]["collectionName"], "posts");
-    assert!(items[0]["id"].as_str().is_some_and(|i| !i.is_empty()), "result 0 has an id: {v}");
+    assert!(
+        items[0]["id"].as_str().is_some_and(|i| !i.is_empty()),
+        "result 0 has an id: {v}"
+    );
     assert_eq!(items[1]["title"], "b");
     assert_eq!(items[1]["views"], 3);
     assert_ne!(items[0]["id"], items[1]["id"], "distinct ids: {v}");
@@ -203,20 +237,37 @@ async fn mixed_methods_patch_then_delete() {
         &app,
         Some(&tok),
         json!([
-            r("PATCH", &format!("/api/collections/posts/records/{id}"), Some(json!({"views": 5}))),
-            r("DELETE", &format!("/api/collections/posts/records/{id}"), None),
+            r(
+                "PATCH",
+                &format!("/api/collections/posts/records/{id}"),
+                Some(json!({"views": 5}))
+            ),
+            r(
+                "DELETE",
+                &format!("/api/collections/posts/records/{id}"),
+                None
+            ),
         ]),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "batch: {v}");
-    let items = v.as_array().unwrap_or_else(|| panic!("body should be an array: {v}"));
+    let items = v
+        .as_array()
+        .unwrap_or_else(|| panic!("body should be an array: {v}"));
     assert_eq!(items.len(), 2, "{v}");
     assert_eq!(items[0]["id"], json!(id), "PATCH returns the record: {v}");
     assert_eq!(items[0]["views"], 5);
     assert_eq!(items[0]["title"], "t");
     assert_eq!(items[1], json!({}), "DELETE returns {{}}: {v}");
 
-    let (s, _) = call(&app, "GET", &format!("/api/collections/posts/records/{id}"), Some(&tok), None).await;
+    let (s, _) = call(
+        &app,
+        "GET",
+        &format!("/api/collections/posts/records/{id}"),
+        Some(&tok),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND, "record is gone after the batch");
     assert_eq!(total(&app, "posts").await, 0);
 }
@@ -237,7 +288,13 @@ async fn fifty_requests_is_the_boundary_not_the_cap() {
     mkposts(&app, json!({})).await;
     let (_, tok) = user(&app, "a@x.com").await;
     let reqs: Vec<Value> = (0..50)
-        .map(|i| r("POST", "/api/collections/posts/records", Some(json!({"title": format!("t{i}")}))))
+        .map(|i| {
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": format!("t{i}")})),
+            )
+        })
         .collect();
 
     let (s, v) = batch(&app, Some(&tok), json!(reqs)).await;
@@ -257,7 +314,11 @@ async fn guest_is_rejected_before_any_work() {
     let (s, v) = batch(
         &app,
         None,
-        json!([r("POST", "/api/collections/posts/records", Some(json!({"title": "a"})))]),
+        json!([r(
+            "POST",
+            "/api/collections/posts/records",
+            Some(json!({"title": "a"}))
+        )]),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "guest batch: {v}");
@@ -270,10 +331,18 @@ async fn requests_must_be_an_array() {
     let app = app();
     let (_, tok) = user(&app, "a@x.com").await;
 
-    for body in [json!({}), json!({"requests": "nope"}), json!({"requests": {"a": 1}}), json!({"requests": 3})] {
+    for body in [
+        json!({}),
+        json!({"requests": "nope"}),
+        json!({"requests": {"a": 1}}),
+        json!({"requests": 3}),
+    ] {
         let (s, v) = call(&app, "POST", "/api/batch", Some(&tok), Some(body.clone())).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "body {body}: {v}");
-        assert_eq!(v["message"], "requests must be an array", "body {body}: {v}");
+        assert_eq!(
+            v["message"], "requests must be an array",
+            "body {body}: {v}"
+        );
     }
 }
 
@@ -287,13 +356,23 @@ async fn cap_of_fifty_rejects_before_executing_anything() {
 
     // 51 individually valid creates: the cap is the only possible reason to fail
     let reqs: Vec<Value> = (0..51)
-        .map(|i| r("POST", "/api/collections/posts/records", Some(json!({"title": format!("t{i}")}))))
+        .map(|i| {
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": format!("t{i}")})),
+            )
+        })
         .collect();
     let (s, v) = batch(&app, Some(&tok), json!(reqs)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "51 requests: {v}");
     assert_eq!(v["message"], "max 50 requests per batch", "{v}");
     assert_eq!(total(&app, "posts").await, 0, "nothing executed: {v}");
-    assert_eq!(snapshot(&app).await, before, "cap rejection must not touch the db");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "cap rejection must not touch the db"
+    );
 }
 
 // spec test 7
@@ -307,16 +386,40 @@ async fn bad_method_or_url_fails_at_its_index() {
 
     let bad = [
         r("GET", "/api/collections/posts/records", None),
-        r("post", "/api/collections/posts/records", Some(json!({"title": "a"}))), // case-sensitive
+        r(
+            "post",
+            "/api/collections/posts/records",
+            Some(json!({"title": "a"})),
+        ), // case-sensitive
         r("PUT", &one, Some(json!({"title": "a"}))),
         r("POST", "/api/health", Some(json!({}))),
-        r("POST", &one, Some(json!({"title": "a"}))),          // POST must have no id
-        r("PATCH", "/api/collections/posts/records", Some(json!({"title": "a"}))), // PATCH needs an id
-        r("DELETE", "/api/collections/posts/records", None),   // DELETE needs an id
-        r("POST", "/api/collections/posts/records?a=1", Some(json!({"title": "a"}))), // no query strings
-        r("POST", "/api/collections//records", Some(json!({"title": "a"}))), // empty collection
-        r("PATCH", &format!("{one}/extra"), Some(json!({"title": "a"}))),    // trailing segment
-        r("POST", "/api/collections/posts", Some(json!({"title": "a"}))),
+        r("POST", &one, Some(json!({"title": "a"}))), // POST must have no id
+        r(
+            "PATCH",
+            "/api/collections/posts/records",
+            Some(json!({"title": "a"})),
+        ), // PATCH needs an id
+        r("DELETE", "/api/collections/posts/records", None), // DELETE needs an id
+        r(
+            "POST",
+            "/api/collections/posts/records?a=1",
+            Some(json!({"title": "a"})),
+        ), // no query strings
+        r(
+            "POST",
+            "/api/collections//records",
+            Some(json!({"title": "a"})),
+        ), // empty collection
+        r(
+            "PATCH",
+            &format!("{one}/extra"),
+            Some(json!({"title": "a"})),
+        ), // trailing segment
+        r(
+            "POST",
+            "/api/collections/posts",
+            Some(json!({"title": "a"})),
+        ),
         json!({"url": "/api/collections/posts/records", "body": {"title": "a"}}), // no method
         json!({"method": "POST", "body": {"title": "a"}}),                        // no url
     ];
@@ -326,11 +429,22 @@ async fn bad_method_or_url_fails_at_its_index() {
         let (s, v) = batch(
             &app,
             Some(&tok),
-            json!([r("POST", "/api/collections/posts/records", Some(json!({"title": "ok"}))), b.clone()]),
+            json!([
+                r(
+                    "POST",
+                    "/api/collections/posts/records",
+                    Some(json!({"title": "ok"}))
+                ),
+                b.clone()
+            ]),
         )
         .await;
         assert_failed_at(s, &v, 1, "bad method or url");
-        assert_eq!(total(&app, "posts").await, 1, "sub-request {b} left a write behind: {v}");
+        assert_eq!(
+            total(&app, "posts").await,
+            1,
+            "sub-request {b} left a write behind: {v}"
+        );
     }
 }
 
@@ -344,7 +458,11 @@ async fn inner_404_flattens_to_400_with_index() {
     let (s, v) = batch(
         &app,
         Some(&tok),
-        json!([r("PATCH", "/api/collections/posts/records/nope", Some(json!({"views": 1})))]),
+        json!([r(
+            "PATCH",
+            "/api/collections/posts/records/nope",
+            Some(json!({"views": 1}))
+        )]),
     )
     .await;
     assert_failed_at(s, &v, 0, "record not found");
@@ -365,14 +483,23 @@ async fn bodies_are_passed_to_the_cores_as_is() {
     let (_, tok) = user(&app, "a@x.com").await;
 
     // POST with no body at all -> Value::Null -> "body must be a JSON object"
-    let (s, v) = batch(&app, Some(&tok), json!([r("POST", "/api/collections/posts/records", None)])).await;
+    let (s, v) = batch(
+        &app,
+        Some(&tok),
+        json!([r("POST", "/api/collections/posts/records", None)]),
+    )
+    .await;
     assert_failed_at(s, &v, 0, "body must be a JSON object");
 
     // non-object body -> same
     let (s, v) = batch(
         &app,
         Some(&tok),
-        json!([r("POST", "/api/collections/posts/records", Some(json!("nope")))]),
+        json!([r(
+            "POST",
+            "/api/collections/posts/records",
+            Some(json!("nope"))
+        )]),
     )
     .await;
     assert_failed_at(s, &v, 0, "body must be a JSON object");
@@ -381,7 +508,11 @@ async fn bodies_are_passed_to_the_cores_as_is() {
     let (s, v) = batch(
         &app,
         Some(&tok),
-        json!([r("POST", "/api/collections/posts/records", Some(json!({"title": "a", "nope": 1})))]),
+        json!([r(
+            "POST",
+            "/api/collections/posts/records",
+            Some(json!({"title": "a", "nope": 1}))
+        )]),
     )
     .await;
     assert_failed_at(s, &v, 0, "unknown field 'nope'");
@@ -390,7 +521,11 @@ async fn bodies_are_passed_to_the_cores_as_is() {
     let (s, v) = batch(
         &app,
         Some(&tok),
-        json!([r("POST", "/api/collections/posts/records", Some(json!({"title": 7})))]),
+        json!([r(
+            "POST",
+            "/api/collections/posts/records",
+            Some(json!({"title": 7}))
+        )]),
     )
     .await;
     assert_failed_at(s, &v, 0, "field 'title' must be text");
@@ -413,24 +548,47 @@ async fn rollback_on_validation_failure() {
     let keep = mkpost(&app, &tok, json!({"title": "keep", "views": 1})).await;
     let before = snapshot(&app).await;
 
-    let good = r("POST", "/api/collections/posts/records", Some(json!({"title": "new"})));
+    let good = r(
+        "POST",
+        "/api/collections/posts/records",
+        Some(json!({"title": "new"})),
+    );
     let (s, v) = batch(
         &app,
         Some(&tok),
         json!([
             good.clone(),
-            r("PATCH", &format!("/api/collections/posts/records/{keep}"), Some(json!({"views": 99}))),
-            r("POST", "/api/collections/posts/records", Some(json!({"views": 2}))), // missing required title
+            r(
+                "PATCH",
+                &format!("/api/collections/posts/records/{keep}"),
+                Some(json!({"views": 99}))
+            ),
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"views": 2}))
+            ), // missing required title
         ]),
     )
     .await;
     assert_failed_at(s, &v, 2, "required");
 
     assert_eq!(total(&app, "posts").await, 1, "the create rolled back: {v}");
-    assert_eq!(snapshot(&app).await, before, "db must be identical after a rolled-back batch");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "db must be identical after a rolled-back batch"
+    );
 
     // positive control: request 0 really would have succeeded, so its absence is rollback
-    let (s, v) = call(&app, "POST", "/api/collections/posts/records", Some(&tok), Some(json!({"title": "new"}))).await;
+    let (s, v) = call(
+        &app,
+        "POST",
+        "/api/collections/posts/records",
+        Some(&tok),
+        Some(json!({"title": "new"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "request 0 was valid standalone: {v}");
 }
 
@@ -446,18 +604,41 @@ async fn rollback_on_missing_record() {
         &app,
         Some(&tok),
         json!([
-            r("POST", "/api/collections/posts/records", Some(json!({"title": "new"}))),
-            r("DELETE", &format!("/api/collections/posts/records/{doomed}"), None),
-            r("PATCH", "/api/collections/posts/records/ghost", Some(json!({"views": 1}))),
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": "new"}))
+            ),
+            r(
+                "DELETE",
+                &format!("/api/collections/posts/records/{doomed}"),
+                None
+            ),
+            r(
+                "PATCH",
+                "/api/collections/posts/records/ghost",
+                Some(json!({"views": 1}))
+            ),
         ]),
     )
     .await;
     assert_failed_at(s, &v, 2, "record not found");
 
     // the delete in slot 1 must be undone too
-    let (s, _) = call(&app, "GET", &format!("/api/collections/posts/records/{doomed}"), Some(&tok), None).await;
+    let (s, _) = call(
+        &app,
+        "GET",
+        &format!("/api/collections/posts/records/{doomed}"),
+        Some(&tok),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "the deleted record came back");
-    assert_eq!(snapshot(&app).await, before, "db must be identical after a rolled-back batch");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "db must be identical after a rolled-back batch"
+    );
 }
 
 #[tokio::test]
@@ -471,17 +652,36 @@ async fn rollback_on_missing_collection() {
         &app,
         Some(&tok),
         json!([
-            r("POST", "/api/collections/posts/records", Some(json!({"title": "new"}))),
-            r("POST", "/api/collections/ghosts/records", Some(json!({"title": "x"}))),
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": "new"}))
+            ),
+            r(
+                "POST",
+                "/api/collections/ghosts/records",
+                Some(json!({"title": "x"}))
+            ),
         ]),
     )
     .await;
     assert_failed_at(s, &v, 1, "no such collection");
 
     assert_eq!(total(&app, "posts").await, 0, "the create rolled back: {v}");
-    assert_eq!(snapshot(&app).await, before, "db must be identical after a rolled-back batch");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "db must be identical after a rolled-back batch"
+    );
 
-    let (s, v) = call(&app, "POST", "/api/collections/posts/records", Some(&tok), Some(json!({"title": "new"}))).await;
+    let (s, v) = call(
+        &app,
+        "POST",
+        "/api/collections/posts/records",
+        Some(&tok),
+        Some(json!({"title": "new"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "request 0 was valid standalone: {v}");
 }
 
@@ -496,15 +696,31 @@ async fn rollback_on_duplicate_email_in_one_batch() {
         &app,
         Some(ADMIN),
         json!([
-            r("POST", "/api/collections/users/records", Some(json!({"email": "dup@x.com", "password": PW}))),
-            r("POST", "/api/collections/users/records", Some(json!({"email": "dup@x.com", "password": PW}))),
+            r(
+                "POST",
+                "/api/collections/users/records",
+                Some(json!({"email": "dup@x.com", "password": PW}))
+            ),
+            r(
+                "POST",
+                "/api/collections/users/records",
+                Some(json!({"email": "dup@x.com", "password": PW}))
+            ),
         ]),
     )
     .await;
     assert_failed_at(s, &v, 1, "email already in use");
 
-    assert_eq!(total(&app, "users").await, before_users, "neither user survived: {v}");
-    assert_eq!(snapshot(&app).await, before, "db must be identical after a rolled-back batch");
+    assert_eq!(
+        total(&app, "users").await,
+        before_users,
+        "neither user survived: {v}"
+    );
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "db must be identical after a rolled-back batch"
+    );
 }
 
 #[tokio::test]
@@ -516,18 +732,44 @@ async fn rollback_undoes_a_long_prefix_of_successes() {
     let before = snapshot(&app).await;
 
     let mut reqs: Vec<Value> = (0..10)
-        .map(|i| r("POST", "/api/collections/posts/records", Some(json!({"title": format!("t{i}")}))))
+        .map(|i| {
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": format!("t{i}")})),
+            )
+        })
         .collect();
     // interleave writes against the pre-existing row so `updated` would move too
-    reqs.push(r("PATCH", &format!("/api/collections/posts/records/{victim}"), Some(json!({"views": 7}))));
-    reqs.push(r("DELETE", &format!("/api/collections/posts/records/{victim}"), None));
-    reqs.push(r("PATCH", "/api/collections/posts/records/ghost", Some(json!({"views": 1}))));
+    reqs.push(r(
+        "PATCH",
+        &format!("/api/collections/posts/records/{victim}"),
+        Some(json!({"views": 7})),
+    ));
+    reqs.push(r(
+        "DELETE",
+        &format!("/api/collections/posts/records/{victim}"),
+        None,
+    ));
+    reqs.push(r(
+        "PATCH",
+        "/api/collections/posts/records/ghost",
+        Some(json!({"views": 1})),
+    ));
 
     let (s, v) = batch(&app, Some(&tok), json!(reqs)).await;
     assert_failed_at(s, &v, 12, "record not found");
 
-    assert_eq!(total(&app, "posts").await, 1, "only the pre-existing row remains: {v}");
-    assert_eq!(snapshot(&app).await, before, "db must be identical after a rolled-back batch");
+    assert_eq!(
+        total(&app, "posts").await,
+        1,
+        "only the pre-existing row remains: {v}"
+    );
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "db must be identical after a rolled-back batch"
+    );
 }
 
 // ------------------------------------------------------------------- rules
@@ -545,22 +787,41 @@ async fn create_rule_gates_batch_creates() {
     let (s, v) = batch(
         &app,
         Some(&tok),
-        json!([r("POST", "/api/collections/posts/records", Some(json!({"title": "sneaky"})))]),
+        json!([r(
+            "POST",
+            "/api/collections/posts/records",
+            Some(json!({"title": "sneaky"}))
+        )]),
     )
     .await;
     assert_failed_at(s, &v, 0, "not allowed");
-    assert_eq!(total(&app, "posts").await, 0, "batch must not bypass createRule: {v}");
+    assert_eq!(
+        total(&app, "posts").await,
+        0,
+        "batch must not bypass createRule: {v}"
+    );
     assert_eq!(snapshot(&app).await, before);
 
     // sanity: the standalone endpoint denies it too (403 for an authed caller)
-    let (s, _) = call(&app, "POST", "/api/collections/posts/records", Some(&tok), Some(json!({"title": "sneaky"}))).await;
+    let (s, _) = call(
+        &app,
+        "POST",
+        "/api/collections/posts/records",
+        Some(&tok),
+        Some(json!({"title": "sneaky"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "standalone create is denied");
 
     // admin bypasses
     let (s, v) = batch(
         &app,
         Some(ADMIN),
-        json!([r("POST", "/api/collections/posts/records", Some(json!({"title": "fine"})))]),
+        json!([r(
+            "POST",
+            "/api/collections/posts/records",
+            Some(json!({"title": "fine"}))
+        )]),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "admin bypasses createRule: {v}");
@@ -577,7 +838,11 @@ async fn create_rule_expression_is_evaluated_per_request() {
     let (s, v) = batch(
         &app,
         Some(&tok),
-        json!([r("POST", "/api/collections/posts/records", Some(json!({"title": "mine", "author": aid})))]),
+        json!([r(
+            "POST",
+            "/api/collections/posts/records",
+            Some(json!({"title": "mine", "author": aid}))
+        )]),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "own create allowed: {v}");
@@ -589,13 +854,25 @@ async fn create_rule_expression_is_evaluated_per_request() {
         &app,
         Some(&tok),
         json!([
-            r("POST", "/api/collections/posts/records", Some(json!({"title": "mine2", "author": aid}))),
-            r("POST", "/api/collections/posts/records", Some(json!({"title": "forged", "author": "someone-else"}))),
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": "mine2", "author": aid}))
+            ),
+            r(
+                "POST",
+                "/api/collections/posts/records",
+                Some(json!({"title": "forged", "author": "someone-else"}))
+            ),
         ]),
     )
     .await;
     assert_failed_at(s, &v, 1, "not allowed");
-    assert_eq!(snapshot(&app).await, before, "rule denial rolls back the whole batch");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "rule denial rolls back the whole batch"
+    );
 }
 
 #[tokio::test]
@@ -608,18 +885,30 @@ async fn update_rule_gates_batch_patches_and_rolls_back() {
     let theirs = mkpost(&app, ADMIN, json!({"title": "theirs", "author": bid})).await;
     let before = snapshot(&app).await;
 
-    let good = r("PATCH", &format!("/api/collections/posts/records/{mine}"), Some(json!({"views": 1})));
+    let good = r(
+        "PATCH",
+        &format!("/api/collections/posts/records/{mine}"),
+        Some(json!({"views": 1})),
+    );
     let (s, v) = batch(
         &app,
         Some(&atok),
         json!([
             good.clone(),
-            r("PATCH", &format!("/api/collections/posts/records/{theirs}"), Some(json!({"views": 42}))),
+            r(
+                "PATCH",
+                &format!("/api/collections/posts/records/{theirs}"),
+                Some(json!({"views": 42}))
+            ),
         ]),
     )
     .await;
     assert_failed_at(s, &v, 1, "not allowed");
-    assert_eq!(snapshot(&app).await, before, "denied patch must roll back the allowed one");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "denied patch must roll back the allowed one"
+    );
 
     // positive control: the allowed patch really was allowed
     let (s, v) = call(
@@ -644,16 +933,28 @@ async fn delete_rule_gates_batch_deletes() {
     let (s, v) = batch(
         &app,
         Some(&tok),
-        json!([r("DELETE", &format!("/api/collections/posts/records/{id}"), None)]),
+        json!([r(
+            "DELETE",
+            &format!("/api/collections/posts/records/{id}"),
+            None
+        )]),
     )
     .await;
     assert_failed_at(s, &v, 0, "not allowed");
-    assert_eq!(snapshot(&app).await, before, "denied delete must not remove the row");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "denied delete must not remove the row"
+    );
 
     let (s, v) = batch(
         &app,
         Some(ADMIN),
-        json!([r("DELETE", &format!("/api/collections/posts/records/{id}"), None)]),
+        json!([r(
+            "DELETE",
+            &format!("/api/collections/posts/records/{id}"),
+            None
+        )]),
     )
     .await;
     assert_eq!(s, StatusCode::OK, "admin bypasses deleteRule: {v}");
@@ -671,19 +972,35 @@ async fn users_own_record_rule_holds_inside_a_batch() {
     let (s, v) = batch(
         &app,
         Some(&atok),
-        json!([r("PATCH", &format!("/api/collections/users/records/{bid}"), Some(json!({"email": "hijack@x.com"})))]),
+        json!([r(
+            "PATCH",
+            &format!("/api/collections/users/records/{bid}"),
+            Some(json!({"email": "hijack@x.com"}))
+        )]),
     )
     .await;
     assert_failed_at(s, &v, 0, "not allowed");
-    assert_eq!(snapshot(&app).await, before, "denied user patch changed nothing");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "denied user patch changed nothing"
+    );
 
     // users.deleteRule likewise
     let (s, v) = batch(
         &app,
         Some(&atok),
-        json!([r("DELETE", &format!("/api/collections/users/records/{bid}"), None)]),
+        json!([r(
+            "DELETE",
+            &format!("/api/collections/users/records/{bid}"),
+            None
+        )]),
     )
     .await;
     assert_failed_at(s, &v, 0, "not allowed");
-    assert_eq!(snapshot(&app).await, before, "denied user delete changed nothing");
+    assert_eq!(
+        snapshot(&app).await,
+        before,
+        "denied user delete changed nothing"
+    );
 }

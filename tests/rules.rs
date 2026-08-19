@@ -186,11 +186,25 @@ async fn null_rule_is_admin_only() {
     assert_eq!(s, StatusCode::UNAUTHORIZED, "guest list users: {v}");
     assert_eq!(v["code"], 401);
 
-    let (s, v) = call(&app, "GET", "/api/collections/users/records", Some(&a), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/users/records",
+        Some(&a),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "user list users: {v}");
     assert_eq!(v["code"], 403);
 
-    let (s, v) = call(&app, "GET", "/api/collections/users/records", Some(ADMIN), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/users/records",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "admin list users: {v}");
     assert_eq!(v["totalItems"], 1);
 
@@ -258,13 +272,34 @@ async fn own_record_update_and_delete() {
     assert_eq!(s, StatusCode::OK);
 
     // A deletes B -> 403; B deletes B -> 200
-    let (s, v) = call(&app, "DELETE", &format!("/api/collections/users/records/{id_b}"), Some(&a), None).await;
+    let (s, v) = call(
+        &app,
+        "DELETE",
+        &format!("/api/collections/users/records/{id_b}"),
+        Some(&a),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "A deletes B: {v}");
-    let (s, _) = call(&app, "DELETE", &format!("/api/collections/users/records/{id_b}"), Some(&b), None).await;
+    let (s, _) = call(
+        &app,
+        "DELETE",
+        &format!("/api/collections/users/records/{id_b}"),
+        Some(&b),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     // still 404 for a record that never existed, whatever the rule says
-    let (s, _) = call(&app, "PATCH", "/api/collections/users/records/nope", Some(ADMIN), Some(json!({}))).await;
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        "/api/collections/users/records/nope",
+        Some(ADMIN),
+        Some(json!({})),
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
@@ -272,7 +307,11 @@ async fn own_record_update_and_delete() {
 #[tokio::test]
 async fn custom_rule_evaluated_against_requester() {
     let app = app();
-    mkposts(&app, json!([{"name": "title", "type": "text"}, {"name": "author", "type": "text"}])).await;
+    mkposts(
+        &app,
+        json!([{"name": "title", "type": "text"}, {"name": "author", "type": "text"}]),
+    )
+    .await;
     let (id_a, a) = user(&app, "a@cave.dev").await;
     let (_id_b, b) = user(&app, "b@cave.dev").await;
 
@@ -299,9 +338,23 @@ async fn custom_rule_evaluated_against_requester() {
     let pid = post["id"].as_str().unwrap().to_string();
     let uri = format!("/api/collections/posts/records/{pid}");
 
-    let (s, v) = call(&app, "PATCH", &uri, Some(&a), Some(json!({"title": "mine2"}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&a),
+        Some(json!({"title": "mine2"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "author patches own post: {v}");
-    let (s, v) = call(&app, "PATCH", &uri, Some(&b), Some(json!({"title": "yours"}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&b),
+        Some(json!({"title": "yours"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "B patches A's post: {v}");
     let (s, _) = call(&app, "PATCH", &uri, None, Some(json!({"title": "guest"}))).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -316,9 +369,23 @@ async fn custom_rule_evaluated_against_requester() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = call(&app, "PATCH", &uri, Some(&a), Some(json!({"title": "mine3"}))).await;
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&a),
+        Some(json!({"title": "mine3"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = call(&app, "PATCH", &uri, Some(&b), Some(json!({"title": "yours"}))).await;
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        &uri,
+        Some(&b),
+        Some(json!({"title": "yours"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN);
 
     // a quoted literal is a bind, not a splice: a rule that is simply false denies everyone
@@ -330,7 +397,11 @@ async fn custom_rule_evaluated_against_requester() {
         Some(json!({"updateRule": "author = 'nobody' OR 1=1--"})),
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "rule with trailing SQL must not compile");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "rule with trailing SQL must not compile"
+    );
 }
 
 // 6. NULL rule set after the fact locks the door for everyone but admin.
@@ -339,11 +410,28 @@ async fn null_rule_locks_out_writers() {
     let app = app();
     mkposts(&app, json!([{"name": "title", "type": "text"}])).await;
     let (_id_a, a) = user(&app, "a@cave.dev").await;
-    let (s, post) = call(&app, "POST", "/api/collections/posts/records", Some(&a), Some(json!({"title": "x"}))).await;
+    let (s, post) = call(
+        &app,
+        "POST",
+        "/api/collections/posts/records",
+        Some(&a),
+        Some(json!({"title": "x"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{post}");
-    let uri = format!("/api/collections/posts/records/{}", post["id"].as_str().unwrap());
+    let uri = format!(
+        "/api/collections/posts/records/{}",
+        post["id"].as_str().unwrap()
+    );
 
-    let (s, v) = call(&app, "PATCH", "/api/collections/posts", Some(ADMIN), Some(json!({"deleteRule": null}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        "/api/collections/posts",
+        Some(ADMIN),
+        Some(json!({"deleteRule": null})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "set deleteRule null: {v}");
     assert_eq!(v["deleteRule"], json!(null));
 
@@ -351,7 +439,11 @@ async fn null_rule_locks_out_writers() {
     assert_eq!(s, StatusCode::FORBIDDEN, "user delete under NULL rule: {v}");
     assert_eq!(v["code"], 403);
     let (s, v) = call(&app, "DELETE", &uri, None, None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "guest delete under NULL rule: {v}");
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "guest delete under NULL rule: {v}"
+    );
     assert_eq!(v["code"], 401);
     let (s, _) = call(&app, "DELETE", &uri, Some(ADMIN), None).await;
     assert_eq!(s, StatusCode::OK, "admin bypasses NULL rule");
@@ -361,7 +453,11 @@ async fn null_rule_locks_out_writers() {
 #[tokio::test]
 async fn list_rule_filters_rows() {
     let app = app();
-    mkposts(&app, json!([{"name": "title", "type": "text"}, {"name": "owner", "type": "text"}])).await;
+    mkposts(
+        &app,
+        json!([{"name": "title", "type": "text"}, {"name": "owner", "type": "text"}]),
+    )
+    .await;
     let (id_a, a) = user(&app, "a@cave.dev").await;
     let (id_b, b) = user(&app, "b@cave.dev").await;
 
@@ -377,7 +473,14 @@ async fn list_rule_filters_rows() {
         assert_eq!(s, StatusCode::OK, "{v}");
     }
     // one row with no owner field at all: NULL comparison must never match
-    let (s, _) = call(&app, "POST", "/api/collections/posts/records", Some(ADMIN), Some(json!({"title": "orphan"}))).await;
+    let (s, _) = call(
+        &app,
+        "POST",
+        "/api/collections/posts/records",
+        Some(ADMIN),
+        Some(json!({"title": "orphan"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     let (s, v) = call(
@@ -390,13 +493,32 @@ async fn list_rule_filters_rows() {
     .await;
     assert_eq!(s, StatusCode::OK, "set listRule: {v}");
 
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records", Some(&a), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records",
+        Some(&a),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["totalItems"], 2, "A sees only its own rows: {v}");
-    let titles: Vec<&str> = v["items"].as_array().unwrap().iter().map(|i| i["title"].as_str().unwrap()).collect();
+    let titles: Vec<&str> = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["title"].as_str().unwrap())
+        .collect();
     assert_eq!(titles, ["a1", "a2"]);
 
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records", Some(&b), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records",
+        Some(&b),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["totalItems"], 1, "{v}");
     assert_eq!(v["items"][0]["title"], "b1");
@@ -408,12 +530,29 @@ async fn list_rule_filters_rows() {
     assert_eq!(v["items"].as_array().unwrap().len(), 0);
 
     // a user filter cannot widen the rule
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records?filter=title%3D'b1'", Some(&a), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records?filter=title%3D'b1'",
+        Some(&a),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v["totalItems"], 0, "user filter must AND with the rule: {v}");
+    assert_eq!(
+        v["totalItems"], 0,
+        "user filter must AND with the rule: {v}"
+    );
 
     // admin bypasses the list rule entirely
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records", Some(ADMIN), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["totalItems"], 4, "{v}");
 }
@@ -424,9 +563,26 @@ async fn invalid_rule_rejected() {
     let app = app();
     mkposts(&app, json!([{"name": "title", "type": "text"}])).await;
 
-    for bad in [json!("no operator here"), json!(5), json!(true), json!(["a"]), json!({"a": 1})] {
-        let (s, v) = call(&app, "PATCH", "/api/collections/posts", Some(ADMIN), Some(json!({"listRule": bad}))).await;
-        assert_eq!(s, StatusCode::BAD_REQUEST, "listRule {bad} must be rejected: {v}");
+    for bad in [
+        json!("no operator here"),
+        json!(5),
+        json!(true),
+        json!(["a"]),
+        json!({"a": 1}),
+    ] {
+        let (s, v) = call(
+            &app,
+            "PATCH",
+            "/api/collections/posts",
+            Some(ADMIN),
+            Some(json!({"listRule": bad})),
+        )
+        .await;
+        assert_eq!(
+            s,
+            StatusCode::BAD_REQUEST,
+            "listRule {bad} must be rejected: {v}"
+        );
         assert_eq!(v["message"], "invalid listRule", "{v}");
     }
     // rejected writes leave the stored rule alone
@@ -445,7 +601,14 @@ async fn invalid_rule_rejected() {
     assert_eq!(v["message"], "invalid createRule");
 
     // unknown collection
-    let (s, _) = call(&app, "PATCH", "/api/collections/ghost", Some(ADMIN), Some(json!({"listRule": ""}))).await;
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        "/api/collections/ghost",
+        Some(ADMIN),
+        Some(json!({"listRule": ""})),
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
@@ -453,13 +616,31 @@ async fn invalid_rule_rejected() {
 #[tokio::test]
 async fn rules_are_admin_only_and_partial() {
     let app = app();
-    mkposts(&app, json!([{"name": "title", "type": "text"}, {"name": "author", "type": "text"}])).await;
+    mkposts(
+        &app,
+        json!([{"name": "title", "type": "text"}, {"name": "author", "type": "text"}]),
+    )
+    .await;
     let (_id_a, a) = user(&app, "a@cave.dev").await;
 
     // non-admin cannot set rules
-    let (s, v) = call(&app, "PATCH", "/api/collections/posts", Some(&a), Some(json!({"listRule": ""}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        "/api/collections/posts",
+        Some(&a),
+        Some(json!({"listRule": ""})),
+    )
+    .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "user sets rules: {v}");
-    let (s, _) = call(&app, "PATCH", "/api/collections/posts", None, Some(json!({"listRule": ""}))).await;
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        "/api/collections/posts",
+        None,
+        Some(json!({"listRule": ""})),
+    )
+    .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
     let (s, _) = call(
         &app,
@@ -529,7 +710,14 @@ async fn rules_are_admin_only_and_partial() {
     );
 
     // a second, unrelated PATCH leaves the earlier ones in place
-    let (s, _) = call(&app, "PATCH", "/api/collections/posts", Some(ADMIN), Some(json!({"viewRule": ""}))).await;
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        "/api/collections/posts",
+        Some(ADMIN),
+        Some(json!({"viewRule": ""})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_rules(
         &collection(&app, "posts").await,
@@ -541,17 +729,31 @@ async fn rules_are_admin_only_and_partial() {
     );
 
     // rules are per collection: notes kept its own
-    assert_eq!(collection(&app, "notes").await["updateRule"], "@request.auth.id != ''");
+    assert_eq!(
+        collection(&app, "notes").await["updateRule"],
+        "@request.auth.id != ''"
+    );
 }
 
 // 10. Empty string really is public, and a literal-valued rule gates single reads.
 #[tokio::test]
 async fn empty_rule_is_public_and_literals_gate_view() {
     let app = app();
-    mkposts(&app, json!([{"name": "title", "type": "text"}, {"name": "visibility", "type": "text"}])).await;
+    mkposts(
+        &app,
+        json!([{"name": "title", "type": "text"}, {"name": "visibility", "type": "text"}]),
+    )
+    .await;
 
     // createRule '' -> a guest can create
-    let (s, _) = call(&app, "PATCH", "/api/collections/posts", Some(ADMIN), Some(json!({"createRule": ""}))).await;
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        "/api/collections/posts",
+        Some(ADMIN),
+        Some(json!({"createRule": ""})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     let (s, pub_post) = call(
         &app,
@@ -561,7 +763,11 @@ async fn empty_rule_is_public_and_literals_gate_view() {
         Some(json!({"title": "open", "visibility": "public"})),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "guest create under empty rule: {pub_post}");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "guest create under empty rule: {pub_post}"
+    );
 
     let (s, priv_post) = call(
         &app,
@@ -584,13 +790,23 @@ async fn empty_rule_is_public_and_literals_gate_view() {
     .await;
     assert_eq!(s, StatusCode::OK);
 
-    let open = format!("/api/collections/posts/records/{}", pub_post["id"].as_str().unwrap());
-    let closed = format!("/api/collections/posts/records/{}", priv_post["id"].as_str().unwrap());
+    let open = format!(
+        "/api/collections/posts/records/{}",
+        pub_post["id"].as_str().unwrap()
+    );
+    let closed = format!(
+        "/api/collections/posts/records/{}",
+        priv_post["id"].as_str().unwrap()
+    );
     let (s, v) = call(&app, "GET", &open, None, None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["title"], "open");
     let (s, v) = call(&app, "GET", &closed, None, None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "guest reads a private record: {v}");
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "guest reads a private record: {v}"
+    );
     let (_id_a, a) = user(&app, "a@cave.dev").await;
     let (s, v) = call(&app, "GET", &closed, Some(&a), None).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "user reads a private record: {v}");
@@ -598,11 +814,25 @@ async fn empty_rule_is_public_and_literals_gate_view() {
     assert_eq!(s, StatusCode::OK, "admin bypasses viewRule");
 
     // a missing record is 404 before any rule talk
-    let (s, _) = call(&app, "GET", "/api/collections/posts/records/ghost", None, None).await;
+    let (s, _) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records/ghost",
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 
     // create is gated in memory, before the insert: an empty createRule never rejects
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records", Some(ADMIN), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["totalItems"], 2, "{v}");
 }

@@ -44,7 +44,9 @@ fn schema_ok(schema: &Value) -> Result<&Vec<Value>, (StatusCode, Json<Value>)> {
     for f in fields {
         let fname = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
         let fty = f.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        if !ident_ok(fname) || !["text", "number", "bool", "json", "relation", "file"].contains(&fty) {
+        if !ident_ok(fname)
+            || !["text", "number", "bool", "json", "relation", "file"].contains(&fty)
+        {
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "schema fields need valid name and type in text|number|bool|json|relation|file",
@@ -134,7 +136,10 @@ pub async fn collections_create(
     }
     let ty = body.get("type").and_then(|t| t.as_str()).unwrap_or("base");
     if ty != "base" && ty != "auth" {
-        return Err(err(StatusCode::BAD_REQUEST, "type must be 'base' or 'auth'"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "type must be 'base' or 'auth'",
+        ));
     }
     let schema = body.get("schema").cloned().unwrap_or(json!([]));
     schema_ok(&schema)?;
@@ -169,7 +174,11 @@ pub async fn collections_create(
     bump(&app);
     Ok(Json(col_json(
         name,
-        &Col { ty: ty.into(), schema: schema.as_array().cloned().unwrap_or_default(), rules },
+        &Col {
+            ty: ty.into(),
+            schema: schema.as_array().cloned().unwrap_or_default(),
+            rules,
+        },
     )))
 }
 

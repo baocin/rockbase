@@ -33,7 +33,10 @@ pub struct RtParams {
 /// event is gated. So an admin tightening a viewRule does apply to already-open
 /// subscriptions, and the staleness window is zero for any event broadcast after
 /// the PATCH response returns.
-type RuleCache = (u64, std::collections::HashMap<String, Option<Option<String>>>);
+type RuleCache = (
+    u64,
+    std::collections::HashMap<String, Option<Option<String>>>,
+);
 
 /// Fail closed: forward an event only if this subscriber could read the record.
 /// Reuses the same rule primitives as `records::gate_record` — in-memory rather
@@ -58,9 +61,9 @@ fn visible(app: &App, w: &Who, topic: &str, record: &Value, cache: &mut RuleCach
         return false; // no such collection
     };
     match check_rule(w, rule) {
-        Ok(None) => true,                                       // admin-bypass or public
+        Ok(None) => true, // admin-bypass or public
         Ok(Some(expr)) => eval_rule_mem(&expr, auth_id(w), data),
-        Err(_) => false,                                        // NULL rule = admin only
+        Err(_) => false, // NULL rule = admin only
     }
 }
 
@@ -89,9 +92,10 @@ pub async fn realtime(
 
     let mut rules: RuleCache = (0, Default::default());
     let rx = app.events.subscribe();
-    let hello = tokio_stream::once(Ok::<_, Infallible>(Event::default().data(
-        json!({ "clientId": uuid::Uuid::new_v4().simple().to_string() }).to_string(),
-    )));
+    let hello = tokio_stream::once(Ok::<_, Infallible>(
+        Event::default()
+            .data(json!({ "clientId": uuid::Uuid::new_v4().simple().to_string() }).to_string()),
+    ));
     let changes = BroadcastStream::new(rx).filter_map(move |m| {
         let ev = m.ok()?;
         let topic = ev.get("topic")?.as_str()?.to_string();

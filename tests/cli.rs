@@ -128,7 +128,10 @@ impl Server {
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                panic!("timed out waiting for {what}; stdout so far: {:?}", self.seen);
+                panic!(
+                    "timed out waiting for {what}; stdout so far: {:?}",
+                    self.seen
+                );
             }
             match self.lines.recv_timeout(left) {
                 Ok(l) => {
@@ -165,7 +168,11 @@ fn spawn(dir: &Path, env: &[(&str, &str)]) -> Server {
             }
         }
     });
-    Server { proc, lines, seen: Vec::new() }
+    Server {
+        proc,
+        lines,
+        seen: Vec::new(),
+    }
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -251,7 +258,10 @@ fn config_rejects_invalid_rb_port() {
         let Some(st) = status else {
             panic!("RB_PORT={bad:?} should abort startup, but the server kept running");
         };
-        assert!(!st.success(), "RB_PORT={bad:?} should exit non-zero, got {st}");
+        assert!(
+            !st.success(),
+            "RB_PORT={bad:?} should exit non-zero, got {st}"
+        );
         // exited, so stderr is at EOF and this cannot block
         let mut errs = String::new();
         if let Some(mut e) = srv.proc.stderr.take() {
@@ -306,9 +316,15 @@ fn logs_one_line_per_request() {
     // exact shape: `METHOD /path STATUS Nms`
     let line = srv.wait_for("request log line", |l| l.starts_with("GET /api/health "));
     let parts: Vec<&str> = line.split(' ').collect();
-    assert_eq!(parts.len(), 4, "log line should be `METHOD /path STATUS Nms`: {line}");
+    assert_eq!(
+        parts.len(),
+        4,
+        "log line should be `METHOD /path STATUS Nms`: {line}"
+    );
     assert_eq!(parts[2], "200", "{line}");
-    let ms = parts[3].strip_suffix("ms").unwrap_or_else(|| panic!("{line}"));
+    let ms = parts[3]
+        .strip_suffix("ms")
+        .unwrap_or_else(|| panic!("{line}"));
     assert!(ms.parse::<u64>().is_ok(), "{line}");
 
     drop(srv);

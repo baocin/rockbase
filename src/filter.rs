@@ -47,7 +47,11 @@ pub fn parse(input: &str, mode: Mode) -> Result<Node, String> {
     if input.len() > MAX_LEN {
         return Err("filter too long".into());
     }
-    let mut p = Parser { b: input.as_bytes(), i: 0, mode };
+    let mut p = Parser {
+        b: input.as_bytes(),
+        i: 0,
+        mode,
+    };
     let n = p.expr(0)?;
     p.ws();
     if p.i < p.b.len() {
@@ -433,7 +437,10 @@ mod tests {
         assert_eq!(binds, vec![Text("%rock%".into())]);
 
         let (frag, binds) = compile("title!~'rock'").unwrap();
-        assert_eq!(frag, "(json_extract(data, '$.title') NOT LIKE ? ESCAPE '\\')");
+        assert_eq!(
+            frag,
+            "(json_extract(data, '$.title') NOT LIKE ? ESCAPE '\\')"
+        );
         assert_eq!(binds, vec![Text("%rock%".into())]);
     }
 
@@ -496,7 +503,10 @@ mod tests {
         );
         // an And root needs no wrap, and must not gain one (filter unit tests pin the SQL)
         let (sql, _) = parse("a = 1 && b = 2", Mode::Rule).unwrap().to_sql("");
-        assert!(!sql.starts_with("(("), "And root should not be double-wrapped: {sql}");
+        assert!(
+            !sql.starts_with("(("),
+            "And root should not be double-wrapped: {sql}"
+        );
     }
 
     // The two backends must return the same verdict for the same rule and data —
@@ -519,11 +529,16 @@ mod tests {
         // Run BOTH backends for real: eval in memory, and to_sql against SQLite. Asserting
         // the bind string alone would only prove two separate claims, not that they agree.
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE records(data TEXT NOT NULL);").unwrap();
+        conn.execute_batch("CREATE TABLE records(data TEXT NOT NULL);")
+            .unwrap();
         for (rule, rec, want) in cases {
             let node = parse(rule, Mode::Rule).unwrap();
             let data = rec.as_object().unwrap().clone();
-            assert_eq!(node.eval("", &data), want, "in-memory verdict for {rule} on {rec}");
+            assert_eq!(
+                node.eval("", &data),
+                want,
+                "in-memory verdict for {rule} on {rec}"
+            );
 
             conn.execute("DELETE FROM records", []).unwrap();
             conn.execute("INSERT INTO records(data) VALUES(?1)", [rec.to_string()])
@@ -536,7 +551,10 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(hit, want, "SQL verdict for {rule} on {rec} disagrees with eval");
+            assert_eq!(
+                hit, want,
+                "SQL verdict for {rule} on {rec} disagrees with eval"
+            );
         }
         // and the escape actually reaches the bind
         let (_, binds) = compile("title~'50%'").unwrap();

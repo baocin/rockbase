@@ -209,14 +209,20 @@ async fn patch_replaces_schema_and_merges_rules() {
     assert_eq!(field_names(&v), ["title", "tags"]);
     assert_eq!(v["schema"][1]["type"], "json");
     assert!(
-        v["schema"][0].get("required").map_or(true, |r| !r.as_bool().unwrap_or(true)),
+        v["schema"][0]
+            .get("required")
+            .is_none_or(|r| !r.as_bool().unwrap_or(true)),
         "title should no longer be required: {v}"
     );
     assert_eq!(v["listRule"], json!(""));
     // untouched rules keep their base defaults (not null — see rules.rs)
     assert_eq!(v["viewRule"], json!(""));
     for k in ["createRule", "updateRule", "deleteRule"] {
-        assert_eq!(v[k], json!("@request.auth.id != ''"), "rule {k} unchanged in {v}");
+        assert_eq!(
+            v[k],
+            json!("@request.auth.id != ''"),
+            "rule {k} unchanged in {v}"
+        );
     }
 
     // a second PATCH touching one rule leaves listRule alone
@@ -232,7 +238,11 @@ async fn patch_replaces_schema_and_merges_rules() {
     let (_, v) = call(&app, "GET", "/api/collections/posts", Some(ADMIN), None).await;
     assert_eq!(v["listRule"], json!(""));
     assert_eq!(v["deleteRule"], "@request.auth.id != ''");
-    assert_eq!(field_names(&v), ["title", "tags"], "rule PATCH must not touch schema");
+    assert_eq!(
+        field_names(&v),
+        ["title", "tags"],
+        "rule PATCH must not touch schema"
+    );
 
     // rules are null-able again
     let (s, v) = call(
@@ -254,9 +264,19 @@ async fn patch_empty_body_is_a_noop() {
 
     let (s, before) = call(&app, "GET", "/api/collections/posts", Some(ADMIN), None).await;
     assert_eq!(s, StatusCode::OK);
-    let (s, v) = call(&app, "PATCH", "/api/collections/posts", Some(ADMIN), Some(json!({}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        "/api/collections/posts",
+        Some(ADMIN),
+        Some(json!({})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v, before, "empty PATCH must return the unchanged collection");
+    assert_eq!(
+        v, before,
+        "empty PATCH must return the unchanged collection"
+    );
 }
 
 #[tokio::test]
@@ -346,7 +366,14 @@ async fn dropped_field_lingers_in_stored_records_but_is_unwritable() {
     assert_eq!(s, StatusCode::OK);
 
     // existing data is untouched: still round-trips on view and list
-    let (s, v) = call(&app, "GET", &format!("/api/collections/posts/records/{id}"), None, None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        &format!("/api/collections/posts/records/{id}"),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["views"], 10);
     let (s, v) = call(&app, "GET", "/api/collections/posts/records", None, None).await;
@@ -419,7 +446,14 @@ async fn adding_required_field_does_not_backfill_existing_records() {
     assert_eq!(s, StatusCode::OK);
 
     // the old record is still readable and simply has no slug
-    let (s, v) = call(&app, "GET", &format!("/api/collections/posts/records/{id}"), None, None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        &format!("/api/collections/posts/records/{id}"),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert!(v.get("slug").is_none(), "no backfill expected: {v}");
 
@@ -488,7 +522,14 @@ async fn changed_field_type_only_affects_future_writes() {
     assert_eq!(s, StatusCode::OK);
 
     // stored value is not re-validated
-    let (s, v) = call(&app, "GET", &format!("/api/collections/posts/records/{id}"), None, None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        &format!("/api/collections/posts/records/{id}"),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(v["views"], 7);
 

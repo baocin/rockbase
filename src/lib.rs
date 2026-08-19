@@ -8,8 +8,8 @@ pub mod collections;
 pub mod db;
 pub mod files;
 pub mod filter;
-pub mod records;
 pub mod realtime;
+pub mod records;
 pub mod rules;
 
 use std::sync::atomic::AtomicU64;
@@ -40,13 +40,14 @@ pub type S = Arc<App>;
 pub type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 
 pub fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (code, Json(json!({ "code": code.as_u16(), "message": msg.into() })))
+    (
+        code,
+        Json(json!({ "code": code.as_u16(), "message": msg.into() })),
+    )
 }
 
 pub fn ident_ok(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    !s.is_empty() && s.len() <= 64 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 async fn health() -> Json<Value> {
@@ -143,7 +144,10 @@ pub fn build_app(conn: Connection, admin_token: String) -> Router {
             "/api/collections/{name}/auth-with-password",
             post(auth::auth_with_password),
         )
-        .route("/api/collections/{name}/auth-refresh", post(auth::auth_refresh))
+        .route(
+            "/api/collections/{name}/auth-refresh",
+            post(auth::auth_refresh),
+        )
         .route(
             "/api/files/{collection}/{id}/{filename}",
             get(files::file_serve),

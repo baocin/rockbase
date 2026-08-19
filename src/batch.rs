@@ -68,7 +68,10 @@ pub async fn batch(State(app): State<S>, headers: HeaderMap, Json(body): Json<Va
         return Err(err(StatusCode::BAD_REQUEST, "requests must be an array"));
     };
     if reqs.len() > MAX {
-        return Err(err(StatusCode::BAD_REQUEST, format!("max {MAX} requests per batch")));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("max {MAX} requests per batch"),
+        ));
     }
 
     let mut db = app.db.lock().unwrap();
@@ -104,4 +107,3 @@ pub async fn batch(State(app): State<S>, headers: HeaderMap, Json(body): Json<Va
     }
     Ok(Json(Value::Array(results)))
 }
-

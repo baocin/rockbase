@@ -68,10 +68,17 @@ async fn sse(app: &Router, uri: &str, auth: Option<&str>) -> Body {
     if let Some(a) = auth {
         req = req.header("authorization", a);
     }
-    let resp = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "subscribe {uri}");
     let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
-    assert!(ct.starts_with("text/event-stream"), "content-type of {uri}: {ct}");
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "content-type of {uri}: {ct}"
+    );
     resp.into_body()
 }
 
@@ -80,7 +87,9 @@ async fn sse(app: &Router, uri: &str, auth: Option<&str>) -> Body {
 async fn drain(body: &mut Body) -> Vec<Value> {
     let mut out = Vec::new();
     while let Ok(Some(Ok(frame))) = timeout(Duration::from_millis(QUIET_MS), body.frame()).await {
-        let Ok(bytes) = frame.into_data() else { continue };
+        let Ok(bytes) = frame.into_data() else {
+            continue;
+        };
         for line in String::from_utf8_lossy(&bytes).lines() {
             if let Some(rest) = line.strip_prefix("data:") {
                 let rest = rest.trim();
@@ -93,12 +102,17 @@ async fn drain(body: &mut Body) -> Vec<Value> {
 
 /// The change events out of a drain, i.e. everything that is not the clientId hello.
 fn changes(vals: Vec<Value>) -> Vec<Value> {
-    vals.into_iter().filter(|v| v.get("clientId").is_none()).collect()
+    vals.into_iter()
+        .filter(|v| v.get("clientId").is_none())
+        .collect()
 }
 
 /// One frame, or None if nothing arrives inside the window.
 async fn next(body: &mut Body) -> Option<Value> {
-    let frame = timeout(Duration::from_millis(QUIET_MS), body.frame()).await.ok()??.ok()?;
+    let frame = timeout(Duration::from_millis(QUIET_MS), body.frame())
+        .await
+        .ok()??
+        .ok()?;
     let bytes = frame.into_data().ok()?;
     let text = String::from_utf8_lossy(&bytes);
     let line = text.lines().find(|l| l.starts_with("data:"))?;
@@ -129,14 +143,27 @@ async fn mkcol(app: &Router, body: Value) {
 }
 
 async fn create(app: &Router, col: &str, auth: Option<&str>, body: Value) -> Value {
-    let (s, v) = call(app, "POST", &format!("/api/collections/{col}/records"), auth, Some(body)).await;
+    let (s, v) = call(
+        app,
+        "POST",
+        &format!("/api/collections/{col}/records"),
+        auth,
+        Some(body),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "create in {col}: {v}");
     v
 }
 
 /// Seed a user through the admin bypass and log in. Returns (record id, "Bearer <tok>").
 async fn user(app: &Router, email: &str) -> (String, String) {
-    let u = create(app, "users", Some(ADMIN), json!({"email": email, "password": PW})).await;
+    let u = create(
+        app,
+        "users",
+        Some(ADMIN),
+        json!({"email": email, "password": PW}),
+    )
+    .await;
     let id = u["id"].as_str().unwrap().to_string();
     let (s, v) = call(
         app,
@@ -152,8 +179,16 @@ async fn user(app: &Router, email: &str) -> (String, String) {
 
 /// posts + comments, both with the default public base rules.
 async fn seed_public(app: &Router) {
-    mkcol(app, json!({"name": "posts", "schema": [{"name": "title", "type": "text"}]})).await;
-    mkcol(app, json!({"name": "comments", "schema": [{"name": "title", "type": "text"}]})).await;
+    mkcol(
+        app,
+        json!({"name": "posts", "schema": [{"name": "title", "type": "text"}]}),
+    )
+    .await;
+    mkcol(
+        app,
+        json!({"name": "comments", "schema": [{"name": "title", "type": "text"}]}),
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -168,14 +203,22 @@ async fn hello_frame_carries_client_id() {
     let id = hello["clientId"]
         .as_str()
         .unwrap_or_else(|| panic!("first frame must be the clientId hello, got {hello}"));
-    assert_eq!(id.len(), 32, "clientId must be a 32-char uuid simple form: {id}");
+    assert_eq!(
+        id.len(),
+        32,
+        "clientId must be a 32-char uuid simple form: {id}"
+    );
     assert!(
-        id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        id.chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
         "clientId must be lowercase hex: {id}"
     );
 
     // and only one hello — nothing else is pending on an idle stream
-    assert!(changes(drain(&mut body).await).is_empty(), "idle stream must be quiet");
+    assert!(
+        changes(drain(&mut body).await).is_empty(),
+        "idle stream must be quiet"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +233,12 @@ async fn create_event_payload_shape() {
     let rec = create(&app, "posts", Some(ADMIN), json!({"title": "hi"})).await;
 
     let evs = changes(drain(&mut body).await);
-    assert_eq!(evs.len(), 1, "expected exactly one event, got {:?}", summary(&evs));
+    assert_eq!(
+        evs.len(),
+        1,
+        "expected exactly one event, got {:?}",
+        summary(&evs)
+    );
     let e = &evs[0];
     assert_eq!(e["action"], "create", "{e}");
     assert_eq!(e["topic"], "posts", "every payload carries its topic: {e}");
@@ -220,11 +268,23 @@ async fn update_and_delete_events() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    let (s, _) = call(&app, "DELETE", &format!("/api/collections/posts/records/{id}"), Some(ADMIN), None).await;
+    let (s, _) = call(
+        &app,
+        "DELETE",
+        &format!("/api/collections/posts/records/{id}"),
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     let evs = changes(drain(&mut body).await);
-    assert_eq!(evs.len(), 2, "expected update then delete, got {:?}", summary(&evs));
+    assert_eq!(
+        evs.len(),
+        2,
+        "expected update then delete, got {:?}",
+        summary(&evs)
+    );
     assert_eq!(evs[0]["action"], "update", "{}", evs[0]);
     assert_eq!(evs[0]["topic"], "posts", "{}", evs[0]);
     assert_eq!(evs[0]["record"]["title"], "after", "{}", evs[0]);
@@ -247,7 +307,12 @@ async fn single_topic_filters_other_collections() {
     create(&app, "posts", Some(ADMIN), json!({"title": "yes"})).await;
 
     let evs = changes(drain(&mut body).await);
-    assert_eq!(evs.len(), 1, "only the posts event may arrive, got {:?}", summary(&evs));
+    assert_eq!(
+        evs.len(),
+        1,
+        "only the posts event may arrive, got {:?}",
+        summary(&evs)
+    );
     assert_eq!(evs[0]["topic"], "posts", "{}", evs[0]);
     assert_eq!(evs[0]["record"]["title"], "yes", "{}", evs[0]);
 }
@@ -259,8 +324,17 @@ async fn single_topic_filters_other_collections() {
 async fn two_topics_receive_both() {
     let app = app();
     seed_public(&app).await;
-    mkcol(&app, json!({"name": "other", "schema": [{"name": "title", "type": "text"}]})).await;
-    let mut body = sse(&app, "/api/realtime?topics=posts,%20comments%20,posts", None).await;
+    mkcol(
+        &app,
+        json!({"name": "other", "schema": [{"name": "title", "type": "text"}]}),
+    )
+    .await;
+    let mut body = sse(
+        &app,
+        "/api/realtime?topics=posts,%20comments%20,posts",
+        None,
+    )
+    .await;
 
     create(&app, "posts", Some(ADMIN), json!({"title": "p"})).await;
     create(&app, "other", Some(ADMIN), json!({"title": "o"})).await;
@@ -269,7 +343,10 @@ async fn two_topics_receive_both() {
     let evs = changes(drain(&mut body).await);
     assert_eq!(
         summary(&evs),
-        vec!["create/posts/p".to_string(), "create/comments/c".to_string()],
+        vec![
+            "create/posts/p".to_string(),
+            "create/comments/c".to_string()
+        ],
         "`other` must be filtered out"
     );
 }
@@ -279,7 +356,11 @@ async fn two_topics_receive_both() {
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn empty_topics_means_all_events() {
-    for uri in ["/api/realtime", "/api/realtime?topics=", "/api/realtime?topics=%20,%20,"] {
+    for uri in [
+        "/api/realtime",
+        "/api/realtime?topics=",
+        "/api/realtime?topics=%20,%20,",
+    ] {
         let app = app();
         seed_public(&app).await;
         let mut body = sse(&app, uri, None).await;
@@ -290,7 +371,10 @@ async fn empty_topics_means_all_events() {
         let evs = changes(drain(&mut body).await);
         assert_eq!(
             summary(&evs),
-            vec!["create/posts/p".to_string(), "create/comments/c".to_string()],
+            vec![
+                "create/posts/p".to_string(),
+                "create/comments/c".to_string()
+            ],
             "{uri} must not filter"
         );
     }
@@ -382,8 +466,20 @@ async fn user_gets_no_events_for_records_a_rule_hides() {
 
     let mut sub = sse(&app, "/api/realtime", Some(&alice)).await;
 
-    create(&app, "posts", Some(ADMIN), json!({"title": "bobs", "owner": bob_id})).await;
-    create(&app, "posts", Some(ADMIN), json!({"title": "alices", "owner": alice_id})).await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "bobs", "owner": bob_id}),
+    )
+    .await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "alices", "owner": alice_id}),
+    )
+    .await;
 
     let evs = changes(drain(&mut sub).await);
     assert!(
@@ -466,7 +562,8 @@ async fn delete_events_are_rule_gated() {
 
     let evs = changes(drain(&mut guest).await);
     assert!(
-        !evs.iter().any(|e| e["record"]["id"] == json!(sid) || e["topic"] == "secrets"),
+        !evs.iter()
+            .any(|e| e["record"]["id"] == json!(sid) || e["topic"] == "secrets"),
         "guest leaked the delete of an admin-only record: {:?}",
         summary(&evs)
     );

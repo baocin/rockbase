@@ -85,10 +85,17 @@ async fn sse(app: &Router, uri: &str, auth: Option<&str>) -> Body {
     if let Some(a) = auth {
         req = req.header("authorization", a);
     }
-    let resp = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "subscribe {uri}");
     let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
-    assert!(ct.starts_with("text/event-stream"), "content-type of {uri}: {ct}");
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "content-type of {uri}: {ct}"
+    );
     resp.into_body()
 }
 
@@ -97,7 +104,9 @@ async fn sse(app: &Router, uri: &str, auth: Option<&str>) -> Body {
 async fn drain(body: &mut Body) -> Vec<Value> {
     let mut out = Vec::new();
     while let Ok(Some(Ok(frame))) = timeout(Duration::from_millis(QUIET_MS), body.frame()).await {
-        let Ok(bytes) = frame.into_data() else { continue };
+        let Ok(bytes) = frame.into_data() else {
+            continue;
+        };
         for line in String::from_utf8_lossy(&bytes).lines() {
             if let Some(rest) = line.strip_prefix("data:") {
                 let rest = rest.trim();
@@ -110,7 +119,9 @@ async fn drain(body: &mut Body) -> Vec<Value> {
 
 /// The change events out of a drain, i.e. everything that is not the clientId hello.
 fn changes(vals: Vec<Value>) -> Vec<Value> {
-    vals.into_iter().filter(|v| v.get("clientId").is_none()).collect()
+    vals.into_iter()
+        .filter(|v| v.get("clientId").is_none())
+        .collect()
 }
 
 /// Compact `[(action, topic, title-or-id)]` view, for readable assertion failures.
@@ -136,7 +147,14 @@ async fn mkcol(app: &Router, body: Value) {
 }
 
 async fn create(app: &Router, col: &str, auth: Option<&str>, body: Value) -> Value {
-    let (s, v) = call(app, "POST", &format!("/api/collections/{col}/records"), auth, Some(body)).await;
+    let (s, v) = call(
+        app,
+        "POST",
+        &format!("/api/collections/{col}/records"),
+        auth,
+        Some(body),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "create in {col}: {v}");
     v
 }
@@ -144,7 +162,13 @@ async fn create(app: &Router, col: &str, auth: Option<&str>, body: Value) -> Val
 /// Seed a user through the admin bypass and log in. Returns (record id, raw JWT).
 /// The raw JWT is what goes in `?token=`; `Bearer {jwt}` is what goes in a header.
 async fn user(app: &Router, email: &str) -> (String, String) {
-    let u = create(app, "users", Some(ADMIN), json!({"email": email, "password": PW})).await;
+    let u = create(
+        app,
+        "users",
+        Some(ADMIN),
+        json!({"email": email, "password": PW}),
+    )
+    .await;
     let id = u["id"].as_str().unwrap().to_string();
     let (s, v) = call(
         app,
@@ -170,12 +194,20 @@ async fn seed_owned(app: &Router) {
         }),
     )
     .await;
-    mkcol(app, json!({"name": "feed", "schema": [{"name": "title", "type": "text"}]})).await;
+    mkcol(
+        app,
+        json!({"name": "feed", "schema": [{"name": "title", "type": "text"}]}),
+    )
+    .await;
 }
 
 /// public `posts` + admin-only `secrets` (NULL list/view rules).
 async fn seed_public_and_secret(app: &Router) {
-    mkcol(app, json!({"name": "posts", "schema": [{"name": "title", "type": "text"}]})).await;
+    mkcol(
+        app,
+        json!({"name": "posts", "schema": [{"name": "title", "type": "text"}]}),
+    )
+    .await;
     mkcol(
         app,
         json!({
@@ -203,8 +235,20 @@ async fn query_token_matches_bearer_header() {
     let mut by_header = sse(&app, "/api/realtime", Some(&format!("Bearer {alice}"))).await;
     let mut by_query = sse(&app, &format!("/api/realtime?token={alice}"), None).await;
 
-    create(&app, "posts", Some(ADMIN), json!({"title": "bobs", "owner": bob_id})).await;
-    create(&app, "posts", Some(ADMIN), json!({"title": "alices", "owner": alice_id})).await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "bobs", "owner": bob_id}),
+    )
+    .await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "alices", "owner": alice_id}),
+    )
+    .await;
     create(&app, "feed", Some(ADMIN), json!({"title": "public"})).await;
 
     let want = summary(&changes(drain(&mut by_header).await));
@@ -212,7 +256,10 @@ async fn query_token_matches_bearer_header() {
 
     assert_eq!(
         want,
-        vec!["create/posts/alices".to_string(), "create/feed/public".to_string()],
+        vec![
+            "create/posts/alices".to_string(),
+            "create/feed/public".to_string()
+        ],
         "sanity: the header subscriber's own baseline"
     );
     assert_eq!(
@@ -241,7 +288,10 @@ async fn query_admin_token_matches_admin_header() {
 
     assert_eq!(
         want,
-        vec!["create/secrets/nuclear".to_string(), "create/posts/public".to_string()],
+        vec![
+            "create/secrets/nuclear".to_string(),
+            "create/posts/public".to_string()
+        ],
         "sanity: the Admin-header subscriber's own baseline"
     );
     assert_eq!(
@@ -260,10 +310,21 @@ async fn query_token_composes_with_topics_filter() {
     seed_owned(&app).await;
     let (alice_id, alice) = user(&app, "alice@cave.dev").await;
 
-    let mut sub = sse(&app, &format!("/api/realtime?topics=posts&token={alice}"), None).await;
+    let mut sub = sse(
+        &app,
+        &format!("/api/realtime?topics=posts&token={alice}"),
+        None,
+    )
+    .await;
 
     create(&app, "feed", Some(ADMIN), json!({"title": "filtered-out"})).await;
-    create(&app, "posts", Some(ADMIN), json!({"title": "alices", "owner": alice_id})).await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "alices", "owner": alice_id}),
+    )
+    .await;
 
     let evs = changes(drain(&mut sub).await);
     assert_eq!(
@@ -298,9 +359,21 @@ async fn query_token_subscriber_is_still_rule_gated() {
 
     let mut sub = sse(&app, &format!("/api/realtime?token={alice}"), None).await;
 
-    create(&app, "posts", Some(ADMIN), json!({"title": "bobs", "owner": bob_id})).await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "bobs", "owner": bob_id}),
+    )
+    .await;
     create(&app, "secrets", Some(ADMIN), json!({"title": "nuclear"})).await;
-    create(&app, "posts", Some(ADMIN), json!({"title": "alices", "owner": alice_id})).await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "alices", "owner": alice_id}),
+    )
+    .await;
 
     let evs = changes(drain(&mut sub).await);
     assert!(
@@ -364,7 +437,8 @@ async fn invalid_query_token_is_guest_not_error() {
 
         let evs = changes(drain(&mut sub).await);
         assert!(
-            !evs.iter().any(|e| e["topic"] == "secrets" || e["record"]["title"] == "nuclear"),
+            !evs.iter()
+                .any(|e| e["topic"] == "secrets" || e["record"]["title"] == "nuclear"),
             "token={t:?} must not grant elevated access, got {:?}",
             summary(&evs)
         );
@@ -394,8 +468,20 @@ async fn header_takes_precedence_over_query_token() {
     )
     .await;
 
-    create(&app, "posts", Some(ADMIN), json!({"title": "bobs", "owner": bob_id})).await;
-    create(&app, "posts", Some(ADMIN), json!({"title": "alices", "owner": alice_id})).await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "bobs", "owner": bob_id}),
+    )
+    .await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "alices", "owner": alice_id}),
+    )
+    .await;
 
     let evs = changes(drain(&mut sub).await);
     assert!(
@@ -431,7 +517,13 @@ async fn bad_header_ignores_valid_query_token() {
     )
     .await;
 
-    create(&app, "posts", Some(ADMIN), json!({"title": "alices", "owner": alice_id})).await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "alices", "owner": alice_id}),
+    )
+    .await;
     create(&app, "feed", Some(ADMIN), json!({"title": "public"})).await;
 
     let evs = changes(drain(&mut sub).await);
@@ -458,11 +550,28 @@ async fn query_token_does_not_authenticate_the_rest_api() {
     let app = app();
     seed_owned(&app).await;
     let (alice_id, alice) = user(&app, "alice@cave.dev").await;
-    create(&app, "posts", Some(ADMIN), json!({"title": "alices", "owner": alice_id})).await;
+    create(
+        &app,
+        "posts",
+        Some(ADMIN),
+        json!({"title": "alices", "owner": alice_id}),
+    )
+    .await;
 
     // admin token in the URL buys nothing on an admin endpoint
-    let (s, v) = call(&app, "GET", &format!("/api/collections?token={ADMIN_TOKEN}"), None, None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "admin token in a URL must not authenticate: {v}");
+    let (s, v) = call(
+        &app,
+        "GET",
+        &format!("/api/collections?token={ADMIN_TOKEN}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "admin token in a URL must not authenticate: {v}"
+    );
 
     // ...nor on a collection write
     let (s, v) = call(
@@ -473,7 +582,11 @@ async fn query_token_does_not_authenticate_the_rest_api() {
         Some(json!({"name": "sneaky", "schema": []})),
     )
     .await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "admin token in a URL must not create collections: {v}");
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "admin token in a URL must not create collections: {v}"
+    );
 
     // ...and a user token in the URL is still a guest on the records API
     let (s, v) = call(
@@ -484,7 +597,11 @@ async fn query_token_does_not_authenticate_the_rest_api() {
         None,
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "guest list of a rule-gated collection: {v}");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "guest list of a rule-gated collection: {v}"
+    );
     assert_eq!(
         v["items"],
         json!([]),
@@ -528,7 +645,10 @@ impl Server {
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                panic!("timed out waiting for {what}; stdout so far: {:?}", self.seen);
+                panic!(
+                    "timed out waiting for {what}; stdout so far: {:?}",
+                    self.seen
+                );
             }
             match self.lines.recv_timeout(left) {
                 Ok(l) => {
@@ -565,11 +685,18 @@ fn spawn(dir: &Path, env: &[(&str, &str)]) -> Server {
             }
         }
     });
-    Server { proc, lines, seen: Vec::new() }
+    Server {
+        proc,
+        lines,
+        seen: Vec::new(),
+    }
 }
 
 fn scratch(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("rockbase_ssetoken_{}_{name}", uuid::Uuid::new_v4().simple()))
+    std::env::temp_dir().join(format!(
+        "rockbase_ssetoken_{}_{name}",
+        uuid::Uuid::new_v4().simple()
+    ))
 }
 
 fn free_port() -> u16 {
@@ -604,7 +731,10 @@ fn request_log_redacts_the_query_token() {
     let data = dir.join("rb_data");
     let mut srv = spawn(
         &dir,
-        &[("RB_PORT", &port.to_string()), ("RB_DIR", data.to_str().unwrap())],
+        &[
+            ("RB_PORT", &port.to_string()),
+            ("RB_DIR", data.to_str().unwrap()),
+        ],
     );
     srv.wait_for("startup banner", |l| l.contains("rockbase on"));
 
@@ -622,7 +752,9 @@ fn request_log_redacts_the_query_token() {
     let mut resp = String::new();
     stream.read_to_string(&mut resp).unwrap();
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
-    srv.wait_for("health request log line", |l| l.starts_with("GET /api/health"));
+    srv.wait_for("health request log line", |l| {
+        l.starts_with("GET /api/health")
+    });
 
     // 2) the real case: the SSE subscription. Its body NEVER ends, so this
     //    request is written and never read — the log line is emitted as soon as
@@ -630,10 +762,13 @@ fn request_log_redacts_the_query_token() {
     let mut sse_stream = connect(port);
     sse_stream
         .write_all(
-            format!("GET /api/realtime?token={SECRET} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes(),
+            format!("GET /api/realtime?token={SECRET} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .as_bytes(),
         )
         .unwrap();
-    srv.wait_for("realtime request log line", |l| l.starts_with("GET /api/realtime"));
+    srv.wait_for("realtime request log line", |l| {
+        l.starts_with("GET /api/realtime")
+    });
     let _ = sse_stream.shutdown(std::net::Shutdown::Both);
 
     for line in &srv.seen {

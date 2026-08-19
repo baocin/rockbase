@@ -20,7 +20,13 @@ fn new_id() -> String {
 }
 
 /// Names record_json injects from system columns; a schema field may not use them.
-pub const RESERVED_FIELDS: [&str; 5] = ["id", "created", "updated", "collectionName", "password_hash"];
+pub const RESERVED_FIELDS: [&str; 5] = [
+    "id",
+    "created",
+    "updated",
+    "collectionName",
+    "password_hash",
+];
 
 pub fn record_json(collection: &str, id: &str, data: &str, created: &str, updated: &str) -> Value {
     let mut obj: Map<String, Value> = serde_json::from_str(data).unwrap_or_default();
@@ -188,7 +194,9 @@ pub async fn records_list(
          ORDER BY {order} LIMIT {per_page} OFFSET {}",
         (page - 1) * per_page
     );
-    let mut stmt = db.prepare(&sql).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let mut stmt = db
+        .prepare(&sql)
+        .map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
     let mut items: Vec<Value> = stmt
         .query_map(params_from_iter(binds.iter()), |r| {
             let (id, data, created, updated): (String, String, String, String) =
@@ -237,7 +245,8 @@ pub(crate) fn gate_record(
     let Some((frag, rbinds)) = compile_rule(&expr, auth_id(w)) else {
         return Err(deny(w)); // stored rule no longer compiles: fail closed
     };
-    let mut binds: Vec<rusqlite::types::Value> = vec![name.to_string().into(), id.to_string().into()];
+    let mut binds: Vec<rusqlite::types::Value> =
+        vec![name.to_string().into(), id.to_string().into()];
     binds.extend(rbinds);
     let allowed: bool = db
         .query_row(
@@ -366,7 +375,10 @@ fn expand_records(db: &Connection, w: &Who, schema: &[Value], expand: &str, item
             match stmt.query_map(params_from_iter(binds.iter()), |r| {
                 let (id, data, created, updated): (String, String, String, String) =
                     (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
-                Ok((id.clone(), record_json(target, &id, &data, &created, &updated)))
+                Ok((
+                    id.clone(),
+                    record_json(target, &id, &data, &created, &updated),
+                ))
             }) {
                 Ok(it) => it.filter_map(|r| r.ok()).collect(),
                 Err(_) => continue,
@@ -405,7 +417,10 @@ fn hash_password(data: &mut Map<String, Value>) -> Result<(), (StatusCode, Json<
     if let Some(pw) = data.remove("password") {
         let pw = pw.as_str().unwrap_or("");
         if pw.len() < 8 {
-            return Err(err(StatusCode::BAD_REQUEST, "password must be at least 8 chars"));
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "password must be at least 8 chars",
+            ));
         }
         let hash = bcrypt::hash(pw, 10)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -413,7 +428,6 @@ fn hash_password(data: &mut Map<String, Value>) -> Result<(), (StatusCode, Json<
     }
     Ok(())
 }
-
 
 /// What one record write produced: the HTTP response body, plus the realtime event
 /// to publish. Cores never lock and never broadcast — the caller does both, which is

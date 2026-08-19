@@ -74,7 +74,13 @@ pub fn sanitize_filename(raw: &str) -> Option<String> {
 // `html` and `svg` are deliberately absent — serving attacker-uploaded markup as
 // text/html from the API origin is stored XSS, so they fall through to octet-stream.
 fn content_type(name: &str) -> &'static str {
-    match name.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+    match name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "jpg" | "jpeg" => "image/jpeg",
         "png" => "image/png",
         "gif" => "image/gif",
@@ -131,7 +137,10 @@ pub async fn read_body(req: Request, state: &S) -> Result<Upload, (StatusCode, J
         .map_err(|_| err(StatusCode::PAYLOAD_TOO_LARGE, "body too large"))?;
     let data = serde_json::from_slice(&bytes)
         .map_err(|e| err(StatusCode::BAD_REQUEST, format!("invalid JSON body: {e}")))?;
-    Ok(Upload { data, files: Vec::new() })
+    Ok(Upload {
+        data,
+        files: Vec::new(),
+    })
 }
 
 async fn read_multipart(mut mp: Multipart) -> Result<Upload, (StatusCode, Json<Value>)> {
@@ -139,7 +148,10 @@ async fn read_multipart(mut mp: Multipart) -> Result<Upload, (StatusCode, Json<V
     let mut files: Vec<FilePart> = Vec::new();
     while let Some(field) = mp.next_field().await.map_err(mp_err)? {
         let Some(name) = field.name().map(str::to_string).filter(|n| ident_ok(n)) else {
-            return Err(err(StatusCode::BAD_REQUEST, "multipart part needs a valid name"));
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "multipart part needs a valid name",
+            ));
         };
         // record_json injects these from system columns, so a part named after one
         // would be stored and never returned — and its bytes orphaned on disk.
@@ -165,7 +177,10 @@ async fn read_multipart(mut mp: Multipart) -> Result<Upload, (StatusCode, Json<V
                 // parser has resynchronised, so the request is refused outright rather
                 // than half-interpreted.
                 let Ok(text) = std::str::from_utf8(&bytes) else {
-                    return Err(err(StatusCode::BAD_REQUEST, format!("field '{name}' is not text")));
+                    return Err(err(
+                        StatusCode::BAD_REQUEST,
+                        format!("field '{name}' is not text"),
+                    ));
                 };
                 if text.chars().any(char::is_control) {
                     return Err(err(
@@ -179,7 +194,10 @@ async fn read_multipart(mut mp: Multipart) -> Result<Upload, (StatusCode, Json<V
             }
         }
     }
-    Ok(Upload { data: Value::Object(data), files })
+    Ok(Upload {
+        data: Value::Object(data),
+        files,
+    })
 }
 
 /// A file part may only target a schema field declared `"type": "file"`. Without this
@@ -207,7 +225,11 @@ pub fn check_file_fields(
 /// Write the buffered parts, after the row is committed.
 // ponytail: the DB row can outlive a failed write, and a replaced file is orphaned
 // until the record is deleted; add two-phase cleanup / a GC pass if disk ever fills.
-pub fn write_files(col: &str, id: &str, files: &[FilePart]) -> Result<(), (StatusCode, Json<Value>)> {
+pub fn write_files(
+    col: &str,
+    id: &str,
+    files: &[FilePart],
+) -> Result<(), (StatusCode, Json<Value>)> {
     if files.is_empty() {
         return Ok(());
     }
@@ -253,7 +275,10 @@ pub async fn file_serve(
         return Err(err(StatusCode::BAD_REQUEST, "invalid filename"));
     }
     let Some(dir) = record_dir(&col, &id) else {
-        return Err(err(StatusCode::BAD_REQUEST, "invalid collection or record id"));
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "invalid collection or record id",
+        ));
     };
     // who() takes the db lock itself, so it must run before we do
     let w = who(&app, &headers);
@@ -293,15 +318,32 @@ mod tests {
         assert_eq!(s("we ird$$.PNG").as_deref(), Some("weird.PNG"));
         assert_eq!(s(&format!("{}.txt", "a".repeat(400))).unwrap().len(), 100);
         // dot-only, empty, and anything that would leave a `..` behind
-        for bad in ["", "   ", "???", ".", "..", "...", "../../etc/passwd", &".".repeat(200)] {
+        for bad in [
+            "",
+            "   ",
+            "???",
+            ".",
+            "..",
+            "...",
+            "../../etc/passwd",
+            &".".repeat(200),
+        ] {
             assert!(s(bad).is_none(), "{bad:?} must be rejected");
         }
         // separator lookalikes must not be silently deleted into a clean name
-        for bad in ["\u{ff0e}\u{ff0e}\u{ff0f}pwned.txt", "a\u{0000}.txt", "\r\n../pwned.txt"] {
+        for bad in [
+            "\u{ff0e}\u{ff0e}\u{ff0f}pwned.txt",
+            "a\u{0000}.txt",
+            "\r\n../pwned.txt",
+        ] {
             assert!(s(bad).is_none(), "{bad:?} must be rejected");
         }
         // whatever survives is always a single path component
-        for raw in ["/etc/passwd", r"C:\Windows\win.ini", "~/.ssh/authorized_keys"] {
+        for raw in [
+            "/etc/passwd",
+            r"C:\Windows\win.ini",
+            "~/.ssh/authorized_keys",
+        ] {
             let out = s(raw).unwrap();
             assert!(!out.contains('/') && !out.contains('\\') && !out.contains(".."));
         }

@@ -49,7 +49,10 @@ fn from_jwt(app: &App, t: &str) -> Option<Who> {
             |r| r.get(0),
         )
         .unwrap_or(false);
-    exists.then(|| Who::User { col: c.col, id: c.sub })
+    exists.then_some(Who::User {
+        col: c.col,
+        id: c.sub,
+    })
 }
 
 /// Resolve a bare credential carrying no scheme prefix — either the admin token or
@@ -91,10 +94,22 @@ pub fn require_admin(app: &App, headers: &HeaderMap) -> Result<(), (StatusCode, 
 }
 
 fn make_token(app: &App, col: &str, id: &str) -> Result<String, (StatusCode, Json<Value>)> {
-    let exp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 7 * 24 * 3600;
-    let claims = Claims { sub: id.into(), col: col.into(), exp };
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(app.jwt_secret.as_bytes()))
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 7 * 24 * 3600;
+    let claims = Claims {
+        sub: id.into(),
+        col: col.into(),
+        exp,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(app.jwt_secret.as_bytes()),
+    )
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 // PocketBase-shaped: valid Bearer of this same collection gets a fresh 7-day
@@ -108,7 +123,10 @@ pub async fn auth_refresh(
         return Err(err(StatusCode::UNAUTHORIZED, "auth token required"));
     };
     if col != name {
-        return Err(err(StatusCode::UNAUTHORIZED, "token is for another collection"));
+        return Err(err(
+            StatusCode::UNAUTHORIZED,
+            "token is for another collection",
+        ));
     }
     // ponytail: no auth-collection type check — a User token only ever names an
     // auth collection, and who() already proved the record exists there.

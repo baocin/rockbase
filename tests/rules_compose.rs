@@ -165,13 +165,30 @@ async fn and_composition_narrows_list() {
     let (id_a, a) = user(&app, "a@cave.dev").await;
     let (id_b, b) = user(&app, "b@cave.dev").await;
 
-    seed(&app, json!({"title": "a-open", "owner": &id_a, "status": "open"})).await;
-    seed(&app, json!({"title": "a-shut", "owner": &id_a, "status": "shut"})).await;
-    seed(&app, json!({"title": "b-open", "owner": &id_b, "status": "open"})).await;
+    seed(
+        &app,
+        json!({"title": "a-open", "owner": &id_a, "status": "open"}),
+    )
+    .await;
+    seed(
+        &app,
+        json!({"title": "a-shut", "owner": &id_a, "status": "shut"}),
+    )
+    .await;
+    seed(
+        &app,
+        json!({"title": "b-open", "owner": &id_b, "status": "open"}),
+    )
+    .await;
     // no owner and no status at all: a NULL operand must never satisfy either side
     seed(&app, json!({"title": "orphan"})).await;
 
-    set_rule(&app, "listRule", "owner = @request.auth.id && status = 'open'").await;
+    set_rule(
+        &app,
+        "listRule",
+        "owner = @request.auth.id && status = 'open'",
+    )
+    .await;
 
     assert_eq!(titles(&app, Some(&a)).await, ["a-open"], "A: own AND open");
     assert_eq!(titles(&app, Some(&b)).await, ["b-open"], "B: own AND open");
@@ -197,9 +214,21 @@ async fn or_composition_widens_list() {
     let (id_a, a) = user(&app, "a@cave.dev").await;
     let (id_b, b) = user(&app, "b@cave.dev").await;
 
-    seed(&app, json!({"title": "a-priv", "owner": &id_a, "visibility": "private"})).await;
-    seed(&app, json!({"title": "b-priv", "owner": &id_b, "visibility": "private"})).await;
-    seed(&app, json!({"title": "open", "owner": &id_b, "visibility": "public"})).await;
+    seed(
+        &app,
+        json!({"title": "a-priv", "owner": &id_a, "visibility": "private"}),
+    )
+    .await;
+    seed(
+        &app,
+        json!({"title": "b-priv", "owner": &id_b, "visibility": "private"}),
+    )
+    .await;
+    seed(
+        &app,
+        json!({"title": "open", "owner": &id_b, "visibility": "public"}),
+    )
+    .await;
     seed(&app, json!({"title": "orphan"})).await;
 
     set_rule(
@@ -211,7 +240,11 @@ async fn or_composition_widens_list() {
 
     assert_eq!(titles(&app, Some(&a)).await, ["a-priv", "open"]);
     assert_eq!(titles(&app, Some(&b)).await, ["b-priv", "open"]);
-    assert_eq!(titles(&app, None).await, ["open"], "guest gets the public one");
+    assert_eq!(
+        titles(&app, None).await,
+        ["open"],
+        "guest gets the public one"
+    );
 
     // a user `filter=` can still only narrow what the rule already allows
     let (s, v) = call(
@@ -223,7 +256,10 @@ async fn or_composition_widens_list() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(v["totalItems"], 0, "filter must AND with a composite rule: {v}");
+    assert_eq!(
+        v["totalItems"], 0,
+        "filter must AND with a composite rule: {v}"
+    );
 }
 
 // 3. `&&` binds tighter than `||`, and parentheses override that.
@@ -259,7 +295,11 @@ async fn precedence_and_parentheses() {
 
     // parens override: a=1 && (b=2 || c=3) -> r1, r2
     set_rule(&app, "listRule", "a = 1 && (b = 2 || c = 3)").await;
-    assert_eq!(titles(&app, None).await, ["r1", "r2"], "parens must override precedence");
+    assert_eq!(
+        titles(&app, None).await,
+        ["r1", "r2"],
+        "parens must override precedence"
+    );
 
     // nesting a level deeper still parses and still means the same thing
     set_rule(&app, "listRule", "((a = 1) && ((b = 2) || (c = 3)))").await;
@@ -306,7 +346,11 @@ async fn composite_rules_gate_view_update_delete() {
     let (s, v) = call(&app, "GET", &uri_open, None, None).await;
     assert_eq!(s, StatusCode::OK, "guest views the public one: {v}");
     let (s, _) = call(&app, "GET", &uri_shut, None, None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "guest is denied the private one");
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "guest is denied the private one"
+    );
     let (s, _) = call(&app, "GET", &uri_shut, Some(&a), None).await;
     assert_eq!(s, StatusCode::OK, "owner satisfies the left disjunct");
     let (s, _) = call(&app, "GET", &uri_shut, Some(&b), None).await;
@@ -319,11 +363,36 @@ async fn composite_rules_gate_view_update_delete() {
         "owner = @request.auth.id && status = 'open'",
     )
     .await;
-    let (s, v) = call(&app, "PATCH", &uri_open, Some(&a), Some(json!({"title": "open2"}))).await;
+    let (s, v) = call(
+        &app,
+        "PATCH",
+        &uri_open,
+        Some(&a),
+        Some(json!({"title": "open2"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "owner patches an open post: {v}");
-    let (s, _) = call(&app, "PATCH", &uri_shut, Some(&a), Some(json!({"title": "x"}))).await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "owner blocked by the second conjunct");
-    let (s, _) = call(&app, "PATCH", &uri_open, Some(&b), Some(json!({"title": "x"}))).await;
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        &uri_shut,
+        Some(&a),
+        Some(json!({"title": "x"})),
+    )
+    .await;
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "owner blocked by the second conjunct"
+    );
+    let (s, _) = call(
+        &app,
+        "PATCH",
+        &uri_open,
+        Some(&b),
+        Some(json!({"title": "x"})),
+    )
+    .await;
     assert_eq!(s, StatusCode::FORBIDDEN, "B blocked by the first conjunct");
     let (s, _) = call(&app, "PATCH", &uri_open, None, Some(json!({"title": "x"}))).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "guest denial is 401");
@@ -343,7 +412,14 @@ async fn composite_rules_gate_view_update_delete() {
     assert_eq!(s, StatusCode::OK, "owner deletes the shut post: {v}");
 
     // a record that never existed is still 404, whatever the composite rule says
-    let (s, _) = call(&app, "GET", "/api/collections/posts/records/ghost", Some(ADMIN), None).await;
+    let (s, _) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records/ghost",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
@@ -371,9 +447,18 @@ async fn composite_create_and_update_agree() {
 
     // (body, expected verdict) — same three shapes down both paths
     let cases = [
-        (json!({"title": "t", "owner": &id_a, "status": "open"}), true),
-        (json!({"title": "t", "owner": &id_a, "status": "shut"}), false),
-        (json!({"title": "t", "owner": &id_b, "status": "open"}), false),
+        (
+            json!({"title": "t", "owner": &id_a, "status": "open"}),
+            true,
+        ),
+        (
+            json!({"title": "t", "owner": &id_a, "status": "shut"}),
+            false,
+        ),
+        (
+            json!({"title": "t", "owner": &id_b, "status": "open"}),
+            false,
+        ),
         // both operands missing entirely: unresolvable, so false on either path
         (json!({"title": "t"}), false),
     ];
@@ -431,12 +516,26 @@ async fn auth_token_binds_inside_composite() {
     // token was compared as a bareword string instead of bound to the caller's id
     seed(&app, json!({"title": "trap", "owner": "@request.auth.id"})).await;
 
-    set_rule(&app, "listRule", "owner = @request.auth.id || owner = 'zzz'").await;
+    set_rule(
+        &app,
+        "listRule",
+        "owner = @request.auth.id || owner = 'zzz'",
+    )
+    .await;
     assert_eq!(titles(&app, Some(&a)).await, ["mine", "shared"]);
-    assert_eq!(titles(&app, None).await, ["shared"], "guest binds an empty id");
+    assert_eq!(
+        titles(&app, None).await,
+        ["shared"],
+        "guest binds an empty id"
+    );
 
     // the same on the left-hand side
-    set_rule(&app, "listRule", "@request.auth.id = owner || owner = 'zzz'").await;
+    set_rule(
+        &app,
+        "listRule",
+        "@request.auth.id = owner || owner = 'zzz'",
+    )
+    .await;
     assert_eq!(titles(&app, Some(&a)).await, ["mine", "shared"]);
 
     // and inside a parenthesised conjunct
@@ -451,7 +550,10 @@ async fn auth_token_binds_inside_composite() {
     // `@request.auth.id != ''` (the base default) still works composed
     set_rule(&app, "listRule", "@request.auth.id != '' && owner = 'zzz'").await;
     assert_eq!(titles(&app, Some(&a)).await, ["shared"]);
-    assert!(titles(&app, None).await.is_empty(), "guest fails the auth conjunct");
+    assert!(
+        titles(&app, None).await.is_empty(),
+        "guest fails the auth conjunct"
+    );
 }
 
 // 7. Composition must not become an injection vector. Every payload either fails
@@ -519,7 +621,14 @@ async fn composite_injection_payloads_never_grant() {
     }
 
     // nothing was dropped: the table and both rows survive
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records", Some(ADMIN), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "records table must still exist: {v}");
     assert_eq!(v["totalItems"], 2, "{v}");
 }
@@ -544,19 +653,22 @@ async fn malformed_composites_rejected_on_write() {
         "{}owner = @request.auth.id",
         "owner = @request.auth.id || ".repeat(120)
     );
-    assert!(long.len() > 2048, "the length-cap case must actually exceed the cap");
+    assert!(
+        long.len() > 2048,
+        "the length-cap case must actually exceed the cap"
+    );
 
     let bad = [
-        "(owner = @request.auth.id".to_string(),          // unbalanced open
-        "owner = @request.auth.id)".to_string(),          // unbalanced close
+        "(owner = @request.auth.id".to_string(), // unbalanced open
+        "owner = @request.auth.id)".to_string(), // unbalanced close
         "((owner = @request.auth.id)".to_string(),
-        "owner = @request.auth.id &&".to_string(),        // dangling operator
-        "|| owner = 'x'".to_string(),                     // leading operator
+        "owner = @request.auth.id &&".to_string(), // dangling operator
+        "|| owner = 'x'".to_string(),              // leading operator
         "owner = @request.auth.id && ".to_string(),
         "owner = @request.auth.id && &&  owner = 'x'".to_string(),
-        "() && owner = 'x'".to_string(),                  // empty group
-        deep,                                             // deeper than the 32 nesting limit
-        long,                                             // longer than the 2048 length cap
+        "() && owner = 'x'".to_string(), // empty group
+        deep,                            // deeper than the 32 nesting limit
+        long,                            // longer than the 2048 length cap
     ];
 
     for r in bad {
@@ -619,10 +731,18 @@ async fn single_comparison_rules_unchanged() {
     assert!(titles(&app, None).await.is_empty());
 
     set_rule(&app, "listRule", "views > 50").await;
-    assert_eq!(titles(&app, None).await, ["b1"], "ordering op on a bare number");
+    assert_eq!(
+        titles(&app, None).await,
+        ["b1"],
+        "ordering op on a bare number"
+    );
 
     set_rule(&app, "listRule", "@request.auth.id != ''").await;
-    assert_eq!(titles(&app, Some(&b)).await.len(), 3, "any authed user sees all");
+    assert_eq!(
+        titles(&app, Some(&b)).await.len(),
+        3,
+        "any authed user sees all"
+    );
     assert!(titles(&app, None).await.is_empty(), "guest sees none");
 
     set_rule(&app, "viewRule", "owner = @request.auth.id").await;
@@ -645,7 +765,11 @@ async fn single_comparison_rules_unchanged() {
         Some(json!({"title": "spoof", "owner": &id_b})),
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "create as someone else stays denied");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "create as someone else stays denied"
+    );
 
     // trailing SQL after a quoted literal is still not a rule
     let (s, _) = call(
@@ -709,7 +833,11 @@ async fn numeric_coercion_agrees_on_both_paths() {
         Some(json!({"title": "float", "score": 1.0})),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "1.0 must satisfy `score = 1` on create, as SQL does: {v}");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "1.0 must satisfy `score = 1` on create, as SQL does: {v}"
+    );
 
     let float_id = seed(&app, json!({"title": "float2", "score": 1.0})).await;
     let (s, v) = call(
@@ -737,7 +865,11 @@ async fn numeric_coercion_agrees_on_both_paths() {
         Some(json!({"title": "float4"})),
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "the coercing conjunct holds inside a composite too");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "the coercing conjunct holds inside a composite too"
+    );
     let (s, _) = call(
         &app,
         "PATCH",

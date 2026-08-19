@@ -85,7 +85,10 @@ async fn call(
     let resp = app.clone().oneshot(req).await.unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(json!(null)))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(json!(null)),
+    )
 }
 
 /// Raw GET: (status, content-type, body bytes).
@@ -179,13 +182,10 @@ async fn upload_bytes(
     auth: Option<&str>,
     body: Vec<u8>,
 ) -> (StatusCode, Value) {
-    let mut req = Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(
-            "content-type",
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        );
+    let mut req = Request::builder().method(method).uri(uri).header(
+        "content-type",
+        format!("multipart/form-data; boundary={BOUNDARY}"),
+    );
     if let Some(a) = auth {
         req = req.header("authorization", a);
     }
@@ -196,14 +196,24 @@ async fn upload_bytes(
         .unwrap();
     let status = resp.status();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap_or(json!(null)))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(json!(null)),
+    )
 }
 
 // ------------------------------------------------------------- fixture helpers
 
 /// Create a collection, asserting 200. `body` is the full collections POST body.
 async fn mkcol(app: &Router, body: Value) {
-    let (s, v) = call(app, "POST", "/api/collections", Some(ADMIN), Some(body.clone())).await;
+    let (s, v) = call(
+        app,
+        "POST",
+        "/api/collections",
+        Some(ADMIN),
+        Some(body.clone()),
+    )
+    .await;
     assert_eq!(
         s,
         StatusCode::OK,
@@ -251,9 +261,9 @@ async fn user(app: &Router, email: &str) -> (String, String) {
 
 /// Every stored filename must be something `sanitize_filename` could have produced.
 fn assert_clean(raw: &str, stored: &Value) {
-    let name = stored
-        .as_str()
-        .unwrap_or_else(|| panic!("upload of {raw:?}: stored value must be a filename string, got {stored}"));
+    let name = stored.as_str().unwrap_or_else(|| {
+        panic!("upload of {raw:?}: stored value must be a filename string, got {stored}")
+    });
     assert!(
         !name.is_empty(),
         "upload of {raw:?}: stored an empty filename"
@@ -286,7 +296,10 @@ async fn file_is_a_schema_field_type() {
     mkposts(&app).await;
     let (s, v) = call(&app, "GET", "/api/collections/posts", Some(ADMIN), None).await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(v["schema"][1]["type"], "file", "file field type round-trips: {v}");
+    assert_eq!(
+        v["schema"][1]["type"], "file",
+        "file field type round-trips: {v}"
+    );
 }
 
 // 2. A file field may not be named after a reserved field, exactly like text fields.
@@ -361,17 +374,30 @@ async fn upload_then_download_roundtrip() {
     .await;
     assert_eq!(s, StatusCode::OK, "multipart create: {v}");
     assert_eq!(v["title"], "hello", "text part becomes a field: {v}");
-    assert_eq!(v["doc"], "a.txt", "file part stores the sanitized filename: {v}");
+    assert_eq!(
+        v["doc"], "a.txt",
+        "file part stores the sanitized filename: {v}"
+    );
     assert_eq!(v["collectionName"], "posts", "{v}");
     let id = v["id"].as_str().expect("id").to_string();
 
     let (s, ct, body) = get_raw(&app, &format!("/api/files/posts/{id}/a.txt"), None).await;
     assert_eq!(s, StatusCode::OK, "download a.txt");
     assert_eq!(body, b"hi", "served bytes are the uploaded bytes");
-    assert!(ct.starts_with("text/plain"), "content-type from extension, got {ct:?}");
+    assert!(
+        ct.starts_with("text/plain"),
+        "content-type from extension, got {ct:?}"
+    );
 
     // the record itself still reports the filename
-    let (s, v) = call(&app, "GET", &format!("/api/collections/posts/records/{id}"), None, None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        &format!("/api/collections/posts/records/{id}"),
+        None,
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["doc"], "a.txt", "{v}");
 }
@@ -433,7 +459,11 @@ async fn json_body_still_works_on_a_file_collection() {
     assert_eq!(v["doc"], "ghost.txt", "{v}");
 
     let (s, _, _) = get_raw(&app, &format!("/api/files/posts/{id}/ghost.txt"), None).await;
-    assert_eq!(s, StatusCode::NOT_FOUND, "no bytes on disk for a JSON-set name");
+    assert_eq!(
+        s,
+        StatusCode::NOT_FOUND,
+        "no bytes on disk for a JSON-set name"
+    );
 }
 
 // 7. Multipart PATCH replaces the file. (specs/files.md acceptance test 6.)
@@ -537,10 +567,17 @@ async fn filenames_are_sanitized() {
     let (s, ct, body) = get_raw(&app, &format!("/api/files/posts/{id}/weird.PNG"), None).await;
     assert_eq!(s, StatusCode::OK, "sanitized name is what serves");
     assert_eq!(body, b"px");
-    assert!(ct.starts_with("image/png"), "extension match is case-insensitive, got {ct:?}");
+    assert!(
+        ct.starts_with("image/png"),
+        "extension match is case-insensitive, got {ct:?}"
+    );
     // the pre-sanitization name must not be reachable
     let (s, _, _) = get_raw(&app, "/api/files/posts/x/we%20ird%24%24.PNG", None).await;
-    assert_ne!(s, StatusCode::OK, "raw client filename must not be a valid key");
+    assert_ne!(
+        s,
+        StatusCode::OK,
+        "raw client filename must not be a valid key"
+    );
 
     // names that sanitize to nothing usable
     for bad in ["...", "..", ".", "???", "", "   "] {
@@ -637,7 +674,11 @@ async fn upload_filenames_cannot_escape_storage() {
             let id = v["id"].as_str().expect("id");
             let name = v["doc"].as_str().unwrap();
             let (gs, _, body) = get_raw(&app, &format!("/api/files/posts/{id}/{name}"), None).await;
-            assert_eq!(gs, StatusCode::OK, "sanitized {raw:?} -> {name:?} must serve");
+            assert_eq!(
+                gs,
+                StatusCode::OK,
+                "sanitized {raw:?} -> {name:?} must serve"
+            );
             assert_eq!(body, b"PWNED");
         }
     }
@@ -656,7 +697,9 @@ async fn upload_filenames_cannot_escape_storage() {
     // nothing called pwned.txt / passwd anywhere in the sandbox
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -665,7 +708,10 @@ async fn upload_filenames_cannot_escape_storage() {
             }
             let n = e.file_name().to_string_lossy().into_owned();
             assert!(
-                !matches!(n.as_str(), "passwd" | "pwned.txt" | "hosts" | "win.ini" | "authorized_keys"),
+                !matches!(
+                    n.as_str(),
+                    "passwd" | "pwned.txt" | "hosts" | "win.ini" | "authorized_keys"
+                ),
                 "traversal escaped: attacker bytes landed at {}",
                 p.display()
             );
@@ -700,7 +746,11 @@ async fn file_part_must_target_a_file_field() {
         &[file("nosuch", "a.txt", b"hi")],
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "file part on an unknown field: {v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "file part on an unknown field: {v}"
+    );
 
     // reserved/system names must not be a back door either
     for name in RESERVED_FIELDS {
@@ -738,7 +788,11 @@ async fn file_part_must_target_a_file_field() {
         &[file("title", "b.txt", b"hi")],
     )
     .await;
-    assert_eq!(s, StatusCode::BAD_REQUEST, "file part on a text field via PATCH: {v}");
+    assert_eq!(
+        s,
+        StatusCode::BAD_REQUEST,
+        "file part on a text field via PATCH: {v}"
+    );
 }
 
 // =============================================================== security: serving
@@ -818,7 +872,12 @@ async fn client_content_type_is_not_trusted() {
         "POST",
         "/api/collections/posts/records",
         Some(ADMIN),
-        &[file_ct("doc", "note.txt", "text/html", b"<script>alert(1)</script>")],
+        &[file_ct(
+            "doc",
+            "note.txt",
+            "text/html",
+            b"<script>alert(1)</script>",
+        )],
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
@@ -836,7 +895,12 @@ async fn client_content_type_is_not_trusted() {
         "POST",
         "/api/collections/posts/records",
         Some(ADMIN),
-        &[file_ct("doc", "pic.png", "application/x-evil; charset=utf-7", b"\x89PNG")],
+        &[file_ct(
+            "doc",
+            "pic.png",
+            "application/x-evil; charset=utf-7",
+            b"\x89PNG",
+        )],
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{v}");
@@ -866,7 +930,11 @@ async fn oversized_upload_is_413() {
         &[file("doc", "big.bin", &vec![b'x'; 3 * 1024 * 1024])],
     )
     .await;
-    assert_eq!(s, StatusCode::OK, "3MB upload must fit under the 10MB cap: {v}");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "3MB upload must fit under the 10MB cap: {v}"
+    );
     let id = v["id"].as_str().expect("id").to_string();
     let (s, _, body) = get_raw(&app, &format!("/api/files/posts/{id}/big.bin"), None).await;
     assert_eq!(s, StatusCode::OK);
@@ -884,7 +952,14 @@ async fn oversized_upload_is_413() {
     assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE, "11MB must be rejected");
 
     // rejected upload left no record behind
-    let (s, v) = call(&app, "GET", "/api/collections/posts/records", Some(ADMIN), None).await;
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/posts/records",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["totalItems"], 1, "only the 3MB record exists: {v}");
 
@@ -894,7 +969,11 @@ async fn oversized_upload_is_413() {
         "POST",
         "/api/collections/posts/records",
         Some(ADMIN),
-        &[file("doc", &"a".repeat(9000), &vec![b'x'; 11 * 1024 * 1024])],
+        &[file(
+            "doc",
+            &"a".repeat(9000),
+            &vec![b'x'; 11 * 1024 * 1024],
+        )],
     )
     .await;
     assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
@@ -930,8 +1009,19 @@ async fn upload_obeys_create_and_update_rules() {
         &[file("doc", "guest.txt", b"nope")],
     )
     .await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "guest upload must be denied: {v}");
-    let (s, v) = call(&app, "GET", "/api/collections/docs/records", Some(ADMIN), None).await;
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "guest upload must be denied: {v}"
+    );
+    let (s, v) = call(
+        &app,
+        "GET",
+        "/api/collections/docs/records",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK, "{v}");
     assert_eq!(v["totalItems"], 0, "a denied upload creates no record: {v}");
 
@@ -965,13 +1055,22 @@ async fn upload_obeys_create_and_update_rules() {
         &[file("doc", "hijack.txt", b"BBB")],
     )
     .await;
-    assert_eq!(s, StatusCode::FORBIDDEN, "admin-only updateRule blocks B: {v}");
+    assert_eq!(
+        s,
+        StatusCode::FORBIDDEN,
+        "admin-only updateRule blocks B: {v}"
+    );
 
     // the original bytes are untouched and no hijack file was written
     let (s, _, body) = get_raw(&app, &format!("/api/files/docs/{id}/mine.txt"), Some(ADMIN)).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(body, b"AAA", "denied PATCH must not overwrite");
-    let (s, _, _) = get_raw(&app, &format!("/api/files/docs/{id}/hijack.txt"), Some(ADMIN)).await;
+    let (s, _, _) = get_raw(
+        &app,
+        &format!("/api/files/docs/{id}/hijack.txt"),
+        Some(ADMIN),
+    )
+    .await;
     assert_eq!(
         s,
         StatusCode::NOT_FOUND,
@@ -1002,7 +1101,10 @@ async fn download_obeys_the_view_rule() {
         "POST",
         "/api/collections/private/records",
         Some(&a),
-        &[text("owner", &a_id), file("doc", "salary.pdf", b"CONFIDENTIAL")],
+        &[
+            text("owner", &a_id),
+            file("doc", "salary.pdf", b"CONFIDENTIAL"),
+        ],
     )
     .await;
     assert_eq!(s, StatusCode::OK, "owner uploads: {v}");
@@ -1075,7 +1177,11 @@ async fn delete_record_removes_its_files() {
     assert_eq!(s, StatusCode::OK, "{v}");
 
     let (s, _, body) = get_raw(&app, &uri, Some(ADMIN)).await;
-    assert_eq!(s, StatusCode::NOT_FOUND, "bytes are gone after record delete");
+    assert_eq!(
+        s,
+        StatusCode::NOT_FOUND,
+        "bytes are gone after record delete"
+    );
     assert!(!String::from_utf8_lossy(&body).contains("hi"));
 
     // and a new record reusing the same route sees nothing stale
@@ -1130,7 +1236,11 @@ async fn denied_delete_keeps_the_file() {
     assert_eq!(s, StatusCode::FORBIDDEN, "B may not delete A's record: {v}");
 
     let (s, _, body) = get_raw(&app, &format!("/api/files/vault/{id}/keep.txt"), None).await;
-    assert_eq!(s, StatusCode::OK, "a denied delete must not remove the file");
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "a denied delete must not remove the file"
+    );
     assert_eq!(body, b"KEEP");
 }
 
@@ -1162,7 +1272,14 @@ async fn deleting_a_collection_removes_its_stored_files() {
         "file should exist before the delete"
     );
 
-    let (s, _) = call(&app, "DELETE", "/api/collections/purgeme", Some(ADMIN), None).await;
+    let (s, _) = call(
+        &app,
+        "DELETE",
+        "/api/collections/purgeme",
+        Some(ADMIN),
+        None,
+    )
+    .await;
     assert_eq!(s, StatusCode::OK);
 
     assert!(

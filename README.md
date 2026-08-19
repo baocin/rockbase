@@ -1,5 +1,8 @@
 # rockbase
 
+[![CI](https://github.com/baocin/rockbase/actions/workflows/ci.yml/badge.svg)](https://github.com/baocin/rockbase/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A PocketBase-shaped backend in a single Rust binary: axum 0.8 over rusqlite, JSON
 records in SQLite, dynamic collections defined at runtime, JWT auth, per-collection
 API rules, file uploads, SSE realtime, transactional batch writes, and a one-file

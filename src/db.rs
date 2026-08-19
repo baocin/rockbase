@@ -77,8 +77,10 @@ pub fn param_get_or_create(conn: &Connection, key: &str, default: &str) -> Strin
         params![key, default],
     )
     .unwrap();
-    conn.query_row("SELECT value FROM _params WHERE key = ?1", [key], |r| r.get(0))
-        .unwrap()
+    conn.query_row("SELECT value FROM _params WHERE key = ?1", [key], |r| {
+        r.get(0)
+    })
+    .unwrap()
 }
 
 /// A collection row. `rules` is indexed by the LIST/VIEW/CREATE/UPDATE/DELETE
@@ -109,8 +111,10 @@ pub fn now(conn: &Connection) -> String {
     // Millisecond resolution, fixed width, so lexicographic ordering == chronological.
     // Plain datetime('now') is second-resolution: records created in the same second
     // tied under ORDER BY created, and pagination could repeat or skip rows.
-    conn.query_row("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')", [], |r| r.get(0))
-        .unwrap()
+    conn.query_row("SELECT strftime('%Y-%m-%d %H:%M:%f', 'now')", [], |r| {
+        r.get(0)
+    })
+    .unwrap()
 }
 
 #[cfg(test)]

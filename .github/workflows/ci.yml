@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # Single-threaded: tests/files.rs sandboxes uploads with set_current_dir,
+      # which is process-global, and tests/cli.rs binds a fixed port to prove the
+      # default. Both are honest about it; running them in parallel is not.
+      - run: cargo test -- --test-threads=1
+
+  build:
+    name: release binary (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      # Do NOT execute the binary here: main() has no arg parsing, it binds and
+      # serves forever, so any `run` that starts it hangs the job until timeout.
+      # SQLite is compiled in (rusqlite "bundled"), so this file is the whole server.
+      - run: test -x target/release/rockbase
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rockbase-${{ matrix.os }}
+          path: target/release/rockbase
+          if-no-files-found: error

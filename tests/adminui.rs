@@ -25,16 +25,28 @@ fn app_with(admin_token: &str) -> Router {
 }
 
 /// Raw GET: status, headers, body as a String (the page is UTF-8 HTML).
-async fn get(app: &Router, uri: &str, auth: Option<&str>) -> (StatusCode, axum::http::HeaderMap, String) {
+async fn get(
+    app: &Router,
+    uri: &str,
+    auth: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, String) {
     let mut req = Request::builder().method("GET").uri(uri);
     if let Some(a) = auth {
         req = req.header("authorization", a);
     }
-    let resp = app.clone().oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
     let status = resp.status();
     let headers = resp.headers().clone();
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    (status, headers, String::from_utf8_lossy(&bytes).into_owned())
+    (
+        status,
+        headers,
+        String::from_utf8_lossy(&bytes).into_owned(),
+    )
 }
 
 fn ctype(h: &axum::http::HeaderMap) -> String {
@@ -80,7 +92,11 @@ async fn admin_ui_three_paths_same_page() {
             "GET {uri} content-type: {:?}",
             ctype(&h)
         );
-        assert_eq!(ctype(&h), ctype(&h0), "GET {uri} content-type differs from /_/");
+        assert_eq!(
+            ctype(&h),
+            ctype(&h0),
+            "GET {uri} content-type differs from /_/"
+        );
         assert_eq!(b, b0, "GET {uri} body differs from /_/");
     }
 }
@@ -102,13 +118,20 @@ async fn admin_ui_needs_no_auth() {
     ] {
         let (s, h, b) = get(&app, "/_/", auth).await;
         assert_eq!(s, StatusCode::OK, "GET /_/ with auth {auth:?} must be 200");
-        assert!(ctype(&h).starts_with("text/html"), "auth {auth:?}: {:?}", ctype(&h));
+        assert!(
+            ctype(&h).starts_with("text/html"),
+            "auth {auth:?}: {:?}",
+            ctype(&h)
+        );
         assert_eq!(b, expected, "auth {auth:?} changed the served page");
     }
 
     // a public static asset must not try to open a session
     let (_, h, _) = get(&app, "/_/", None).await;
-    assert!(h.get("set-cookie").is_none(), "admin page must not set cookies");
+    assert!(
+        h.get("set-cookie").is_none(),
+        "admin page must not set cookies"
+    );
     assert!(
         h.get("www-authenticate").is_none(),
         "admin page must not challenge for credentials"
@@ -156,7 +179,8 @@ async fn admin_ui_has_cors_headers() {
     let (s, h, _) = get(&app, "/_/", None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
-        h.get("access-control-allow-origin").map(|v| v.to_str().unwrap()),
+        h.get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
         Some("*"),
         "missing CORS origin header on /_/"
     );
@@ -176,9 +200,15 @@ async fn admin_ui_has_cors_headers() {
         .body(Body::empty())
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT, "OPTIONS /_/ preflight");
     assert_eq!(
-        resp.headers().get("access-control-allow-origin").map(|v| v.to_str().unwrap()),
+        resp.status(),
+        StatusCode::NO_CONTENT,
+        "OPTIONS /_/ preflight"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
         Some("*")
     );
 }
@@ -198,7 +228,12 @@ async fn admin_ui_no_wildcard_under_underscore() {
         "/_index.html",
     ] {
         let (s, _, b) = get(&app, uri, None).await;
-        assert_eq!(s, StatusCode::NOT_FOUND, "GET {uri} must 404, got body {:.120}", b);
+        assert_eq!(
+            s,
+            StatusCode::NOT_FOUND,
+            "GET {uri} must 404, got body {:.120}",
+            b
+        );
     }
 
     // and the API is untouched by the new routes
@@ -227,7 +262,10 @@ async fn admin_ui_asset_contract() {
         !body.contains("innerHTML"),
         "innerHTML must not appear anywhere in the admin page"
     );
-    assert!(body.contains("textContent"), "admin page must use textContent");
+    assert!(
+        body.contains("textContent"),
+        "admin page must use textContent"
+    );
 
     // single file, kept small
     assert!(
